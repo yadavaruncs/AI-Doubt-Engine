@@ -1,0 +1,40 @@
+"""Central configuration. Everything is env-overridable so the same image
+runs locally against Ollama and in the cloud against a hosted model."""
+
+import os
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+DATA_DIR = ROOT / "data"
+
+# ---------------------------------------------------------------- LLM
+# OpenAI-compatible endpoint. Works with OpenAI, Groq, Together, or a local
+# Ollama server (http://localhost:11434/v1, api_key can be anything).
+LLM_BASE_URL = os.getenv("LLM_BASE_URL", "https://api.openai.com/v1")
+LLM_API_KEY = os.getenv("LLM_API_KEY", "")
+LLM_MODEL = os.getenv("LLM_MODEL", "gpt-4o-mini")
+ROUTER_MODEL = os.getenv("ROUTER_MODEL", LLM_MODEL)
+LLM_TIMEOUT = float(os.getenv("LLM_TIMEOUT", "60"))
+
+# ---------------------------------------------------------------- Vector store
+QDRANT_URL = os.getenv("QDRANT_URL", "http://localhost:6333")
+QDRANT_API_KEY = os.getenv("QDRANT_API_KEY") or None
+COLLECTION = os.getenv("QDRANT_COLLECTION", "physics_doubts")
+
+# ---------------------------------------------------------------- Models
+# fastembed runs these on CPU with no API key, so ingestion works offline.
+DENSE_MODEL = os.getenv("DENSE_MODEL", "BAAI/bge-small-en-v1.5")
+SPARSE_MODEL = os.getenv("SPARSE_MODEL", "Qdrant/bm25")
+RERANK_MODEL = os.getenv("RERANK_MODEL", "Xenova/ms-marco-MiniLM-L-6-v2")
+DENSE_DIM = int(os.getenv("DENSE_DIM", "384"))  # bge-small-en-v1.5
+
+# ---------------------------------------------------------------- Retrieval
+CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", "800"))
+CHUNK_OVERLAP = int(os.getenv("CHUNK_OVERLAP", "120"))
+CANDIDATES_K = int(os.getenv("CANDIDATES_K", "20"))  # pre-rerank
+FINAL_K = int(os.getenv("FINAL_K", "4"))  # post-rerank, into the prompt
+
+# ---------------------------------------------------------------- Cache
+SEMANTIC_CACHE_ENABLED = os.getenv("SEMANTIC_CACHE_ENABLED", "1") == "1"
+SEMANTIC_CACHE_THRESHOLD = float(os.getenv("SEMANTIC_CACHE_THRESHOLD", "0.93"))
+SEMANTIC_CACHE_SIZE = int(os.getenv("SEMANTIC_CACHE_SIZE", "512"))
