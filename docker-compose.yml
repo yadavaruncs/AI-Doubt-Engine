@@ -31,6 +31,7 @@ services:
       - "8501:8501"
     environment:
       API_URL: http://api:8000
+      API_KEY: ${API_KEY:-}
     depends_on:
       - api
 

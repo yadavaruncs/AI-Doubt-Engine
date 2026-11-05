@@ -7,32 +7,58 @@ GET  /metrics    -> cache stats and rolling latency percentiles
 
 from __future__ import annotations
 
+import hmac
+import logging
+import threading
 import time
-from collections import deque
+from collections import Counter, deque
+from contextlib import asynccontextmanager
 from statistics import median
+from typing import Literal
 
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from app.cache import CACHE
-from app.config import COLLECTION
+from app.config import API_KEY, COLLECTION, CORS_ORIGINS, RATE_LIMIT_PER_MIN
 from app.graph import GRAPH
 from app.store import client, ensure_collection
 
-app = FastAPI(title="AI Doubt Engine", version="0.1.0")
+logger = logging.getLogger(__name__)
+
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    try:
+        ensure_collection()
+    except Exception as exc:  # noqa: BLE001 - don't crash-loop if Qdrant is slow to boot
+        print(f"[startup] Qdrant not ready yet: {exc}")
+    yield
+
+
+app = FastAPI(title="AI Doubt Engine", version="0.1.0", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=CORS_ORIGINS,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-_LATENCIES: deque[float] = deque(maxlen=500)
+_LATENCIES: deque[float] = deque(maxlen=500)  # cache misses only, see ask()
+_rate_lock = threading.Lock()
+_rate_minute = 0
+_rate_counts: Counter[str] = Counter()
+
+
+class Turn(BaseModel):
+    role: Literal["user", "assistant"]
+    content: str = Field(max_length=2000)
 
 
 class AskRequest(BaseModel):
     question: str = Field(min_length=1, max_length=2000)
+    history: list[Turn] = Field(default=[], max_length=6)
     use_cache: bool = True
 
 
@@ -46,14 +72,6 @@ class AskResponse(BaseModel):
     latency_ms: float = 0.0
     prompt_tokens: int = 0
     completion_tokens: int = 0
-
-
-@app.on_event("startup")
-def _startup() -> None:
-    try:
-        ensure_collection()
-    except Exception as exc:  # noqa: BLE001 - don't crash-loop if Qdrant is slow to boot
-        print(f"[startup] Qdrant not ready yet: {exc}")
 
 
 @app.get("/healthz")
@@ -88,18 +106,49 @@ def metrics() -> dict:
     }
 
 
-@app.post("/ask", response_model=AskResponse)
+def guard(request: Request, x_api_key: str = Header(default="")) -> None:
+    """Every /ask spends LLM money, so it needs a key and a rate limit."""
+    global _rate_minute
+    if API_KEY and not hmac.compare_digest(x_api_key, API_KEY):
+        raise HTTPException(401, "Missing or invalid X-API-Key.")
+    if not RATE_LIMIT_PER_MIN:
+        return
+    # shortcut: per-process and keyed on the direct peer, so a reverse proxy makes
+    # all students one client; use the gateway's limiter once there is one.
+    ip = request.client.host if request.client else "unknown"
+    minute = int(time.time() // 60)
+    with _rate_lock:
+        if minute != _rate_minute:
+            _rate_minute = minute
+            _rate_counts.clear()
+        _rate_counts[ip] += 1
+        limited = _rate_counts[ip] > RATE_LIMIT_PER_MIN
+    if limited:
+        raise HTTPException(429, "Too many requests. Please wait a minute.")
+
+
+@app.post("/ask", response_model=AskResponse, dependencies=[Depends(guard)])
 def ask(req: AskRequest) -> AskResponse:
     started = time.perf_counter()
+    # shortcut: "why?" means nothing without its conversation, so turns with
+    # history skip the cache; cache on the condensed question if hit rate suffers.
+    use_cache = req.use_cache and not req.history
 
-    if req.use_cache:
-        hit = CACHE.get(req.question)
-        if hit is not None:
-            hit["latency_ms"] = round((time.perf_counter() - started) * 1000, 2)
-            _LATENCIES.append(hit["latency_ms"])
-            return AskResponse(**hit)
+    try:
+        if use_cache:
+            hit = CACHE.get(req.question)
+            if hit is not None:
+                # Kept out of _LATENCIES: near-zero hits would flatter the graph's p95.
+                hit["latency_ms"] = round((time.perf_counter() - started) * 1000, 2)
+                return AskResponse(**hit)
 
-    state = GRAPH.invoke({"question": req.question})
+        state = GRAPH.invoke(
+            {"question": req.question, "history": [t.model_dump() for t in req.history]}
+        )
+    except Exception as exc:  # noqa: BLE001 - Qdrant or LLM down, timeout, bad response
+        logger.exception("failed to answer doubt")
+        raise HTTPException(503, "Could not answer right now. Please retry.") from exc
+
     latency_ms = round((time.perf_counter() - started) * 1000, 2)
     _LATENCIES.append(latency_ms)
 
@@ -116,7 +165,9 @@ def ask(req: AskRequest) -> AskResponse:
     }
 
     # Don't cache refusals or scope rejections — they'd poison later near-matches.
-    if req.use_cache and state.get("route") != "out_of_scope":
+    # Nor numeric answers: "20 m tower" and "50 m tower" are near-identical vectors
+    # with different correct answers.
+    if use_cache and state.get("route") not in ("out_of_scope", "numeric"):
         if "I don't have this in my source material" not in payload["answer"]:
             CACHE.put(req.question, payload)
 

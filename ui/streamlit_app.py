@@ -7,6 +7,7 @@ import requests
 import streamlit as st
 
 API = os.getenv("API_URL", "http://localhost:8000")
+API_KEY = os.getenv("API_KEY", "")
 
 st.set_page_config(page_title="AI Doubt Engine", page_icon="🔬", layout="centered")
 st.title("🔬 AI Doubt Engine")
@@ -61,7 +62,15 @@ if prompt := st.chat_input("Ask a physics doubt..."):
             try:
                 r = requests.post(
                     f"{API}/ask",
-                    json={"question": prompt, "use_cache": use_cache},
+                    json={
+                        "question": prompt,
+                        "use_cache": use_cache,
+                        "history": [
+                            {"role": m["role"], "content": m["content"][:2000]}
+                            for m in st.session_state.messages[:-1][-6:]
+                        ],
+                    },
+                    headers={"X-API-Key": API_KEY},
                     timeout=120,
                 )
                 r.raise_for_status()

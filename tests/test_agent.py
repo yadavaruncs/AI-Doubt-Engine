@@ -1,0 +1,206 @@
+"""Graph and API behaviour with the LLM scripted, so failures are reproducible."""
+
+import json
+from types import SimpleNamespace as NS
+
+import pytest
+from fastapi.testclient import TestClient
+
+import app.graph as graph
+import app.main as main
+from app.cache import SemanticCache
+from app.llm import Completion
+
+
+def _tool_msg(name: str, arguments: str) -> NS:
+    call = NS(id="call_1", function=NS(name=name, arguments=arguments))
+    return NS(content=None, tool_calls=[call])
+
+
+class ScriptedLLM:
+    """Stands in for client(): replays messages and records each request."""
+
+    def __init__(self, *messages):
+        self.script = list(messages)
+        self.requests = []
+        self.chat = NS(completions=NS(create=self._create))
+
+    def _create(self, **kwargs):
+        self.requests.append(kwargs)
+        msg = self.script.pop(0) if len(self.script) > 1 else self.script[0]
+        return NS(choices=[NS(message=msg)], usage=None)
+
+
+def _run_numeric(monkeypatch, *messages):
+    llm = ScriptedLLM(*messages)
+    monkeypatch.setattr(graph, "client", lambda: llm)
+    return graph.numeric_node({"question": "q", "context": ""}), llm
+
+
+@pytest.mark.parametrize(
+    "name,arguments",
+    [
+        ("calculate", '{"expression": "1 +'),  # truncated by max_tokens
+        ("calculate", '"just a string"'),
+        ("no_such_tool", "{}"),
+    ],
+)
+def test_bad_tool_call_is_reported_to_the_model(monkeypatch, name, arguments):
+    state, llm = _run_numeric(
+        monkeypatch, _tool_msg(name, arguments), NS(content="done", tool_calls=None)
+    )
+    assert state["answer"] == "done"
+    assert state["tool_calls"][0]["result"]["ok"] is False
+    assert json.loads(llm.requests[1]["messages"][-1]["content"])["ok"] is False
+
+
+def test_missing_tool_argument_is_reported_to_the_model(monkeypatch):
+    monkeypatch.setitem(graph.TOOL_IMPLS, "calculate", lambda expression: {"ok": True})
+    state, _ = _run_numeric(
+        monkeypatch, _tool_msg("calculate", "{}"), NS(content="done", tool_calls=None)
+    )
+    assert state["tool_calls"][0]["result"]["ok"] is False
+
+
+def test_last_round_must_answer_instead_of_calling_tools(monkeypatch):
+    monkeypatch.setitem(graph.TOOL_IMPLS, "calculate", lambda expression: {"ok": True})
+    _, llm = _run_numeric(monkeypatch, _tool_msg("calculate", '{"expression": "1"}'))
+    assert [r["tool_choice"] for r in llm.requests] == ["auto"] * 3 + ["none"]
+
+
+@pytest.mark.parametrize(
+    "output,question,label",
+    [
+        ("numeric", "q", "numeric"),
+        ('"Numeric".', "q", "numeric"),
+        ("**conceptual**", "q", "conceptual"),
+        ("Category: out of scope", "q", "out_of_scope"),
+        ("out-of-scope", "q", "out_of_scope"),
+        ("no idea", "a 20 m tower", "numeric"),
+        ("no idea", "what is inertia", "conceptual"),
+    ],
+)
+def test_router_parsing(monkeypatch, output, question, label):
+    monkeypatch.setattr(graph, "complete", lambda *a, **k: Completion(output, "m"))
+    assert graph.route_node({"question": question})["route"] == label
+
+
+def test_retrieve_node_applies_ablation_config(monkeypatch):
+    seen = {}
+
+    def fake_retrieve(query, **kwargs):
+        seen.update(kwargs)
+        return []
+
+    monkeypatch.setattr(graph, "retrieve", fake_retrieve)
+    cfg = {"use_hybrid": False, "use_rerank": False}
+    graph.retrieve_node({"question": "q", "retrieval": cfg})
+    assert seen == cfg
+
+
+def _fake_complete(prompts):
+    def complete(prompt, **kwargs):
+        prompts.append(prompt)
+        if "standalone question" in prompt:
+            return Completion("What if the mass of the ball doubles?", "m", 5, 5)
+        if "Classify" in prompt:
+            return Completion("conceptual", "m", 5, 5)
+        return Completion("answer", "m", 5, 5)
+
+    return complete
+
+
+def test_followup_is_condensed_before_retrieval(monkeypatch, seeded_store):
+    prompts = []
+    monkeypatch.setattr(graph, "complete", _fake_complete(prompts))
+    state = graph.GRAPH.invoke(
+        {
+            "question": "what if it doubles?",
+            "history": [{"role": "user", "content": "momentum of a ball"}],
+        }
+    )
+    assert "momentum of a ball" in prompts[0]
+    assert "What if the mass of the ball doubles?" in prompts[1]
+    assert state["prompt_tokens"] == 15
+
+
+def test_no_history_skips_the_condense_call(monkeypatch, seeded_store):
+    prompts = []
+    monkeypatch.setattr(graph, "complete", _fake_complete(prompts))
+    state = graph.GRAPH.invoke({"question": "what is inertia"})
+    assert state["answer"] == "answer"
+    assert len(prompts) == 2
+
+
+# ------------------------------------------------------------------- API
+@pytest.fixture
+def api(monkeypatch):
+    monkeypatch.setattr(main, "CACHE", SemanticCache(max_size=8, threshold=0.99))
+    monkeypatch.setattr(main, "_LATENCIES", main.deque(maxlen=500))
+    monkeypatch.setattr(main, "_rate_counts", main.Counter())
+    return TestClient(main.app)
+
+
+def _stub_graph(monkeypatch, route="conceptual"):
+    calls = []
+
+    def invoke(state):
+        calls.append(state)
+        return {"answer": "42", "route": route}
+
+    monkeypatch.setattr(main, "GRAPH", NS(invoke=invoke))
+    return calls
+
+
+def test_backend_failure_is_a_clean_503(api, monkeypatch):
+    def boom(_):
+        raise ConnectionError("qdrant at 10.0.0.5 refused")
+
+    monkeypatch.setattr(main, "GRAPH", NS(invoke=boom))
+    resp = api.post("/ask", json={"question": "q"})
+    assert resp.status_code == 503
+    assert "10.0.0.5" not in resp.text
+
+
+def test_numeric_answers_are_not_cached(api, monkeypatch):
+    calls = _stub_graph(monkeypatch, route="numeric")
+    for _ in range(2):
+        assert api.post("/ask", json={"question": "a 20 m tower"}).json()["cached"] is False
+    assert len(calls) == 2
+
+
+def test_cache_hits_stay_out_of_latency_metrics(api, monkeypatch):
+    calls = _stub_graph(monkeypatch)
+    api.post("/ask", json={"question": "what is inertia"})
+    assert api.post("/ask", json={"question": "what is inertia"}).json()["cached"] is True
+    assert len(calls) == 1
+    assert api.get("/metrics").json()["requests"] == 1
+
+
+def test_followups_bypass_cache_and_reach_the_graph(api, monkeypatch):
+    calls = _stub_graph(monkeypatch)
+    history = [{"role": "user", "content": "what is momentum"}]
+    for _ in range(2):
+        api.post("/ask", json={"question": "why?", "history": history})
+    assert len(calls) == 2
+    assert calls[0]["history"] == history
+
+
+def test_history_is_length_limited(api):
+    history = [{"role": "user", "content": "x"}] * 7
+    assert api.post("/ask", json={"question": "q", "history": history}).status_code == 422
+
+
+def test_api_key_required_when_configured(api, monkeypatch):
+    _stub_graph(monkeypatch)
+    monkeypatch.setattr(main, "API_KEY", "secret")
+    assert api.post("/ask", json={"question": "q"}).status_code == 401
+    ok = api.post("/ask", json={"question": "q"}, headers={"X-API-Key": "secret"})
+    assert ok.status_code == 200
+
+
+def test_rate_limit(api, monkeypatch):
+    _stub_graph(monkeypatch)
+    monkeypatch.setattr(main, "RATE_LIMIT_PER_MIN", 2)
+    codes = [api.post("/ask", json={"question": "q"}).status_code for _ in range(3)]
+    assert codes == [200, 200, 429]

@@ -2,6 +2,10 @@
 
 import pytest
 
+import sys
+from types import SimpleNamespace as NS
+
+import app.tools
 from app.tools import calculate, solve_equation
 
 
@@ -13,6 +17,10 @@ from app.tools import calculate, solve_equation
         ("9.8*3", 29.4),
         ("(1/2)*5*4^2", 40.0),   # caret is treated as a power, not XOR
         ("sin(pi/6)", 0.5),
+        ("3e8*2", 6e8),
+        ("3.e8", 3e8),
+        ("2E3 + 1", 2001.0),
+        ("6.626e-34*3e8", 1.9878e-25),
     ],
 )
 def test_calculate_numeric(expression, expected):
@@ -59,9 +67,42 @@ def test_malformed_expression_fails_cleanly():
         "[x for x in range(10)]",
         "Integer(2).__class__",
         "a" * 500,
+        "pi.n(5000)",
+        "3e8.n(5000)",
+        "x3e8",
+        "3e8x",
     ],
 )
 def test_parser_rejects_injection(payload):
     """sympy's parse_expr calls eval() underneath. Regression test for a real
     hole: without the guard in app.tools these payloads execute."""
     assert not calculate(payload)["ok"]
+
+
+def test_decimals_still_allowed_after_attribute_guard():
+    assert calculate("2.5 * .5")["value"] == pytest.approx(1.25)
+
+
+def test_runaway_expression_is_killed(monkeypatch):
+    monkeypatch.setattr(app.tools, "TOOL_TIMEOUT", 3)
+    result = calculate("9^9^9")
+    assert not result["ok"]
+    assert "timed out" in result["error"]
+
+
+def test_runaway_solve_is_killed_too(monkeypatch):
+    monkeypatch.setattr(app.tools, "TOOL_TIMEOUT", 3)
+    assert "timed out" in solve_equation("x = 9^9^9")["error"]
+
+
+def test_wrong_tool_arguments_fail_cleanly():
+    assert not calculate(wrong="1")["ok"]
+
+
+def test_memory_limit_is_applied_where_supported(monkeypatch):
+    calls = []
+    fake = NS(RLIMIT_AS=9, setrlimit=lambda *a: calls.append(a))
+    monkeypatch.setitem(sys.modules, "resource", fake)
+    monkeypatch.setattr(app.tools, "TOOL_MEMORY_MB", 2)
+    app.tools._limit_memory()
+    assert calls == [(9, (2097152, 2097152))]

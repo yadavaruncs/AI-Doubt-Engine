@@ -16,6 +16,9 @@ LLM_MODEL = os.getenv("LLM_MODEL", "gpt-4o-mini")
 ROUTER_MODEL = os.getenv("ROUTER_MODEL", LLM_MODEL)
 LLM_TIMEOUT = float(os.getenv("LLM_TIMEOUT", "60"))
 
+TOOL_TIMEOUT = float(os.getenv("TOOL_TIMEOUT", "5"))  # seconds per SymPy call
+TOOL_MEMORY_MB = int(os.getenv("TOOL_MEMORY_MB", "1024"))  # enforced on Linux only
+
 # ---------------------------------------------------------------- Vector store
 QDRANT_URL = os.getenv("QDRANT_URL", "http://localhost:6333")
 QDRANT_API_KEY = os.getenv("QDRANT_API_KEY") or None
@@ -38,3 +41,9 @@ FINAL_K = int(os.getenv("FINAL_K", "4"))  # post-rerank, into the prompt
 SEMANTIC_CACHE_ENABLED = os.getenv("SEMANTIC_CACHE_ENABLED", "1") == "1"
 SEMANTIC_CACHE_THRESHOLD = float(os.getenv("SEMANTIC_CACHE_THRESHOLD", "0.93"))
 SEMANTIC_CACHE_SIZE = int(os.getenv("SEMANTIC_CACHE_SIZE", "512"))
+SEMANTIC_CACHE_TTL = float(os.getenv("SEMANTIC_CACHE_TTL", "3600"))  # seconds
+
+# ---------------------------------------------------------------- API
+CORS_ORIGINS = os.getenv("CORS_ORIGINS", "http://localhost:8501").split(",")
+API_KEY = os.getenv("API_KEY", "")  # empty = no auth, for local development
+RATE_LIMIT_PER_MIN = int(os.getenv("RATE_LIMIT_PER_MIN", "60"))  # per client IP, 0 = off

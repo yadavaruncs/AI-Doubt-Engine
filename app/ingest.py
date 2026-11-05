@@ -52,28 +52,29 @@ def chunk_text(
     Splitting on paragraphs first keeps a worked example or a derivation intact,
     which a blind character window would cut in half.
     """
+    if not 0 <= overlap < size - 1:
+        raise ValueError(f"need 0 <= overlap < size - 1, got {overlap=} {size=}")
+    # Room for the overlap prefix added below, so no chunk ends up over `size`.
+    body = size - overlap - 1 if overlap else size
     paras = [p.strip() for p in text.split("\n\n") if p.strip()]
     chunks: list[str] = []
     buf = ""
     for para in paras:
-        if len(buf) + len(para) + 2 <= size:
+        if len(buf) + len(para) + 2 <= body:
             buf = f"{buf}\n\n{para}" if buf else para
             continue
         if buf:
             chunks.append(buf)
-        if len(para) <= size:
+        if len(para) <= body:
             buf = para
         else:  # a single oversized paragraph: hard-window it
-            start = 0
-            while start < len(para):
-                chunks.append(para[start : start + size])
-                start += size - overlap
+            chunks.extend(para[i : i + body] for i in range(0, len(para), body))
             buf = ""
     if buf:
         chunks.append(buf)
 
     # Re-introduce overlap between neighbours so a fact on a boundary is findable.
-    if overlap <= 0 or len(chunks) < 2:
+    if overlap == 0 or len(chunks) < 2:
         return chunks
     overlapped = [chunks[0]]
     for prev, cur in zip(chunks, chunks[1:]):

@@ -48,7 +48,9 @@ This project addresses each of those explicitly and measures the result.
                               answer + citations
 ```
 
-A **semantic cache** sits in front of the whole graph: questions within a cosine threshold of a previously answered one return instantly, which is the single biggest latency and cost win in an edtech workload where thousands of students ask the same doubt in different words.
+A **semantic cache** sits in front of the whole graph: questions within a cosine threshold of a previously answered one return instantly, which is the single biggest latency and cost win in an edtech workload where thousands of students ask the same doubt in different words. Numeric answers are never cached, because "20 m tower" and "50 m tower" embed almost identically but have different answers. Entries expire after `SEMANTIC_CACHE_TTL` so a re-ingest takes effect.
+
+`POST /ask` accepts up to six prior turns in `history`. When present, a condense step first rewrites the follow-up into a standalone question, so the router, retriever and answer prompts stay conversation-free. Turns with history bypass the cache.
 
 ### Design decisions worth defending
 
@@ -87,6 +89,8 @@ python -m app.ingest --path data/
 uvicorn app.main:app --reload
 ```
 
+Point IDs are derived from chunk content, so re-running ingest overwrites instead of duplicating. Use `--recreate` whenever a source file is edited or removed, otherwise its old chunks stay.
+
 **No API key?** Set `LLM_BASE_URL=http://localhost:11434/v1` and run Ollama locally. Embeddings and reranking run on CPU via fastembed and never need a key.
 
 ---
@@ -122,10 +126,10 @@ It runs the same questions through four configurations and writes `eval/results.
 ## Tests
 
 ```bash
-pip install pytest && python -m pytest tests/ -q
+pip install pytest httpx && python -m pytest tests/ -q
 ```
 
-30 tests, no network, no API key, no Qdrant server — embeddings are stubbed and Qdrant runs in-memory. Includes a regression suite for a real vulnerability: SymPy's `parse_expr` calls `eval()` underneath, and without the guard in `app/tools.py` an expression like `__import__('os').system(...)` executes. Never pass model-generated strings to a math parser without a allowlist.
+No network, no API key, no Qdrant server — embeddings are stubbed and Qdrant runs in-memory. Includes a regression suite for a real vulnerability: SymPy's `parse_expr` calls `eval()` underneath, and without the guard in `app/tools.py` an expression like `__import__('os').system(...)` executes. Never pass model-generated strings to a math parser without a allowlist.
 
 ---
 
@@ -138,7 +142,7 @@ app/
   store.py       Qdrant collection, hybrid RRF search, dense-only baseline
   retrieval.py   candidates → rerank → top-k, with ablation switches
   tools.py       SymPy calculator + solver, hardened against injection
-  graph.py       LangGraph agent: route → retrieve → answer (+ tool loop)
+  graph.py       LangGraph agent: condense → route → retrieve → answer (+ tool loop)
   cache.py       semantic cache
   ingest.py      PDF/text → paragraph-aware chunks → Qdrant
   main.py        FastAPI: /ask /healthz /metrics

@@ -1,12 +1,12 @@
 """LangGraph agent.
 
-    route ──> out_of_scope ──────────────────┐
-      │                                      │
-      ├──> retrieve ──> conceptual ──────────┤──> END
-      │                      │               │
-      └──> retrieve ──> numeric ──> tools ───┘
-                           ^           │
-                           └───────────┘  (tool loop, bounded)
+    condense ──> route ──> out_of_scope ──────────────────┐
+                   │                                      │
+                   ├──> retrieve ──> conceptual ──────────┤──> END
+                   │                      │               │
+                   └──> retrieve ──> numeric ──> tools ───┘
+                                        ^           │
+                                        └───────────┘  (tool loop, bounded)
 
 Routing first is what keeps cost down: an out-of-scope message never touches
 the vector store, and a conceptual doubt never pays for the tool loop.
@@ -15,6 +15,8 @@ the vector store, and a conceptual doubt never pays for the tool loop.
 from __future__ import annotations
 
 import json
+import logging
+import re
 import time
 from typing import Annotated, Literal, TypedDict
 
@@ -25,12 +27,15 @@ from app.llm import client, complete
 from app.prompts import (
     ANSWER_SYSTEM,
     CONCEPTUAL_PROMPT,
+    CONDENSE_PROMPT,
     NUMERIC_PROMPT,
     OUT_OF_SCOPE_REPLY,
     ROUTER_PROMPT,
 )
 from app.retrieval import format_context, retrieve
 from app.tools import TOOL_IMPLS, TOOL_SCHEMAS
+
+logger = logging.getLogger(__name__)
 
 MAX_TOOL_ROUNDS = 4
 
@@ -41,6 +46,8 @@ def _add(a: int, b: int) -> int:
 
 class DoubtState(TypedDict, total=False):
     question: str
+    history: list[dict]
+    retrieval: dict  # retrieve() overrides; only the eval harness sets these
     route: Literal["conceptual", "numeric", "out_of_scope"]
     hits: list
     context: str
@@ -53,6 +60,29 @@ class DoubtState(TypedDict, total=False):
 
 
 # --------------------------------------------------------------- nodes
+def condense_node(state: DoubtState) -> DoubtState:
+    """Turn a follow-up into a standalone question, so nothing downstream needs
+    to know about the conversation. Costs an LLM call only when there is history."""
+    history = state.get("history")
+    if not history:
+        return {}
+    out = complete(
+        CONDENSE_PROMPT.format(
+            history="\n".join(f"{m['role']}: {m['content']}" for m in history),
+            question=state["question"],
+        ),
+        model=ROUTER_MODEL,
+        temperature=0.0,
+        max_tokens=200,
+    )
+    return {
+        "question": out.text or state["question"],
+        "prompt_tokens": out.prompt_tokens,
+        "completion_tokens": out.completion_tokens,
+        "llm_ms": out.latency_ms,
+    }
+
+
 def route_node(state: DoubtState) -> DoubtState:
     out = complete(
         ROUTER_PROMPT.format(question=state["question"]),
@@ -60,9 +90,13 @@ def route_node(state: DoubtState) -> DoubtState:
         temperature=0.0,
         max_tokens=8,
     )
-    label = out.text.strip().lower().strip('."\'')
-    if label not in {"conceptual", "numeric", "out_of_scope"}:
-        label = "conceptual"  # safest fallback: retrieve and explain
+    # Tolerates "**numeric**", "Category: numeric", "out of scope"...
+    text = re.sub(r"[\s-]+", "_", out.text.lower())
+    label = next((l for l in ("out_of_scope", "numeric", "conceptual") if l in text), None)
+    if label is None:
+        # The numeric path also retrieves, so it is safe for a question with numbers.
+        label = "numeric" if re.search(r"\d", state["question"]) else "conceptual"
+        logger.warning("unparseable router output %r, using %s", out.text, label)
     return {
         "route": label,
         "prompt_tokens": out.prompt_tokens,
@@ -72,7 +106,7 @@ def route_node(state: DoubtState) -> DoubtState:
 
 
 def retrieve_node(state: DoubtState) -> DoubtState:
-    hits = retrieve(state["question"])
+    hits = retrieve(state["question"], **state.get("retrieval", {}))
     return {
         "hits": hits,
         "context": format_context(hits),
@@ -113,12 +147,14 @@ def numeric_node(state: DoubtState) -> DoubtState:
     p_tokens = c_tokens = 0
     elapsed = 0.0
 
-    for _ in range(MAX_TOOL_ROUNDS):
+    for round_no in range(1, MAX_TOOL_ROUNDS + 1):
         started = time.perf_counter()
         resp = client().chat.completions.create(
             model=LLM_MODEL,
             messages=messages,
             tools=TOOL_SCHEMAS,
+            # Last round must answer, or the final tool results are never read.
+            tool_choice="none" if round_no == MAX_TOOL_ROUNDS else "auto",
             temperature=0.1,
             max_tokens=900,
         )
@@ -156,15 +192,15 @@ def numeric_node(state: DoubtState) -> DoubtState:
         )
         for tc in msg.tool_calls:
             fn = TOOL_IMPLS.get(tc.function.name)
+            args = {}
+            # Errors go back to the model, which can correct itself next round.
             try:
+                if fn is None:
+                    raise ValueError(f"unknown tool {tc.function.name}")
                 args = json.loads(tc.function.arguments or "{}")
-            except json.JSONDecodeError:
-                args = {}
-            result = (
-                fn(**args)
-                if fn
-                else {"ok": False, "error": f"unknown tool {tc.function.name}"}
-            )
+                result = fn(**args)
+            except Exception as exc:  # noqa: BLE001 - bad JSON, bad args, dead worker
+                result = {"ok": False, "error": f"tool call failed: {exc}"}
             calls_made.append({"tool": tc.function.name, "args": args, "result": result})
             messages.append(
                 {
@@ -199,13 +235,15 @@ def build_graph():
     # Node names must not collide with state keys ("route" is a key), hence
     # "router" / "retriever" / "answer_*".
     g = StateGraph(DoubtState)
+    g.add_node("condenser", condense_node)
     g.add_node("router", route_node)
     g.add_node("retriever", retrieve_node)
     g.add_node("answer_conceptual", conceptual_node)
     g.add_node("answer_numeric", numeric_node)
     g.add_node("reject", out_of_scope_node)
 
-    g.add_edge(START, "router")
+    g.add_edge(START, "condenser")
+    g.add_edge("condenser", "router")
     g.add_conditional_edges(
         "router", _branch, {"retriever": "retriever", "reject": "reject"}
     )

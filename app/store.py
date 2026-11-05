@@ -71,9 +71,19 @@ def upsert(chunks: list[dict], batch_size: int = 32) -> int:
         texts = [b["text"] for b in batch]
         dense = embed_dense(texts)
         sparse = embed_sparse(texts)
+        if len(dense[0]) != DENSE_DIM:
+            raise ValueError(
+                f"DENSE_MODEL produces {len(dense[0])} dimensions but DENSE_DIM={DENSE_DIM}"
+            )
         points = [
             models.PointStruct(
-                id=str(uuid.uuid4()),
+                # Derived from content, so re-ingesting overwrites instead of duplicating.
+                id=str(
+                    uuid.uuid5(
+                        uuid.NAMESPACE_URL,
+                        f"{batch[j].get('source')}:{batch[j].get('page')}:{batch[j]['text']}",
+                    )
+                ),
                 vector={
                     DENSE_VEC: dense[j],
                     SPARSE_VEC: models.SparseVector(

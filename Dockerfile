@@ -16,6 +16,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY app ./app
 COPY eval ./eval
 COPY ui ./ui
+COPY tests ./tests
 
 # Warm the ONNX weights into the image so the first request isn't a 30s download.
 RUN python -c "from fastembed import TextEmbedding, SparseTextEmbedding; \
@@ -23,6 +24,9 @@ from fastembed.rerank.cross_encoder import TextCrossEncoder; \
 TextEmbedding('BAAI/bge-small-en-v1.5'); \
 SparseTextEmbedding('Qdrant/bm25'); \
 TextCrossEncoder('Xenova/ms-marco-MiniLM-L-6-v2')"
+
+RUN useradd --create-home app && chown -R app /app
+USER app
 
 EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=40s \

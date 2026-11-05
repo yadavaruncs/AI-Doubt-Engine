@@ -18,7 +18,8 @@ import json
 import time
 from pathlib import Path
 
-from app.config import FINAL_K
+from app.config import FINAL_K, LLM_API_KEY, LLM_BASE_URL, LLM_MODEL
+from app.embeddings import embed_dense, embed_dense_one
 from app.retrieval import retrieve
 
 CONFIGS = {
@@ -83,6 +84,8 @@ def ragas_scores(rows: list[dict], cfg: dict) -> dict:
     Requires an LLM key (RAGAS uses a judge model). Skip with --no-ragas.
     """
     from datasets import Dataset
+    from langchain_core.embeddings import Embeddings
+    from langchain_openai import ChatOpenAI
     from ragas import evaluate
     from ragas.metrics import (
         answer_relevancy,
@@ -94,18 +97,36 @@ def ragas_scores(rows: list[dict], cfg: dict) -> dict:
 
     records = {"question": [], "answer": [], "contexts": [], "ground_truth": []}
     for row in rows:
-        hits = retrieve(row["question"], final_k=FINAL_K, **cfg)
-        state = GRAPH.invoke({"question": row["question"]})
+        # The contexts must be the ones this answer was generated from.
+        state = GRAPH.invoke(
+            {"question": row["question"], "retrieval": {"final_k": FINAL_K, **cfg}}
+        )
         records["question"].append(row["question"])
         records["answer"].append(state.get("answer", ""))
-        records["contexts"].append([h.text for h in hits] or [""])
+        records["contexts"].append([h.text for h in state.get("hits", [])] or [""])
         records["ground_truth"].append(row.get("ground_truth", ""))
 
+    class LocalEmbeddings(Embeddings):
+        def embed_documents(self, texts):
+            return embed_dense(texts)
+
+        def embed_query(self, text):
+            return embed_dense_one(text)
+
+    metrics = [faithfulness, answer_relevancy, context_precision]
+    # RAGAS defaults to OpenAI; use the configured endpoint so Groq/Ollama work too.
     result = evaluate(
         Dataset.from_dict(records),
-        metrics=[faithfulness, answer_relevancy, context_precision],
+        metrics=metrics,
+        llm=ChatOpenAI(
+            model=LLM_MODEL,
+            base_url=LLM_BASE_URL,
+            api_key=LLM_API_KEY or "not-needed-for-local",
+        ),
+        embeddings=LocalEmbeddings(),
     )
-    return {k: round(float(v), 4) for k, v in result.items() if isinstance(v, (int, float))}
+    scores = result.to_pandas()
+    return {m.name: round(float(scores[m.name].mean()), 4) for m in metrics}
 
 
 def main() -> None:
@@ -123,10 +144,7 @@ def main() -> None:
         print(f"--- {name} ---")
         scores = {"config": name, **retrieval_scores(rows, cfg)}
         if not args.no_ragas:
-            try:
-                scores.update(ragas_scores(rows, cfg))
-            except Exception as exc:  # noqa: BLE001
-                print(f"  RAGAS skipped: {exc}")
+            scores.update(ragas_scores(rows, cfg))
         table.append(scores)
         print("  " + "  ".join(f"{k}={v}" for k, v in scores.items() if k != "config"))
         print()

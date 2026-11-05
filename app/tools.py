@@ -7,7 +7,9 @@ the model only narrates the result.
 
 from __future__ import annotations
 
+import multiprocessing as mp
 import re
+from functools import partial
 
 import sympy as sp
 from sympy.parsing.sympy_parser import (
@@ -16,6 +18,8 @@ from sympy.parsing.sympy_parser import (
     parse_expr,
     standard_transformations,
 )
+
+from app.config import TOOL_MEMORY_MB, TOOL_TIMEOUT
 
 _TRANSFORMS = standard_transformations + (
     implicit_multiplication_application,
@@ -36,6 +40,10 @@ _ALLOWED = {name: getattr(sp, name) for name in (
 # alone still permits sympy internals to be reached by name.
 _SAFE_CHARS = re.compile(r"^[0-9a-zA-Z+\-*/^().,\s=<>!]*$")
 _IDENTIFIER = re.compile(r"[A-Za-z][A-Za-z0-9]*")
+_ATTRIBUTE = re.compile(r"\.\s*[A-Za-z]")
+# 3e8 is a number, not the name e8. The boundaries stop this from hiding a real
+# name from the checks below, as it would in x3e8 or 3e8.n.
+_SCI_NUMBER = re.compile(r"(?<![A-Za-z0-9.])(?:\d+\.?\d*|\.\d+)[eE][+-]?\d+(?![A-Za-z0-9.])")
 _SAFE_NAMES = set(_ALLOWED) | {
     # single/short symbols a physics problem legitimately uses as variables
     *"abcdefghijklmnopqrstuvwxyz",
@@ -67,7 +75,10 @@ def _guard(expression: str) -> str:
         raise UnsafeExpression("underscores are not allowed")
     if not _SAFE_CHARS.match(expr):
         raise UnsafeExpression("expression contains disallowed characters")
-    for name in _IDENTIFIER.findall(expr):
+    bare = _SCI_NUMBER.sub("0", expr)
+    if _ATTRIBUTE.search(bare):  # e.g. pi.n(5000): the dot is meant for decimals
+        raise UnsafeExpression("attribute access is not allowed")
+    for name in _IDENTIFIER.findall(bare):
         if name not in _SAFE_NAMES:
             raise UnsafeExpression(f"unknown name: {name}")
     return expr
@@ -83,7 +94,7 @@ def _parse(expression: str):
     )
 
 
-def calculate(expression: str) -> dict:
+def _calculate(expression: str) -> dict:
     """Evaluate a numeric/symbolic expression. Returns exact and decimal forms."""
     try:
         expr = _parse(expression)
@@ -102,7 +113,7 @@ def calculate(expression: str) -> dict:
         return {"ok": False, "input": expression, "error": str(exc)}
 
 
-def solve_equation(equation: str, variable: str = "x") -> dict:
+def _solve_equation(equation: str, variable: str = "x") -> dict:
     """Solve 'lhs = rhs' (or an expression assumed equal to zero) for a variable."""
     try:
         _guard(variable)
@@ -121,6 +132,47 @@ def solve_equation(equation: str, variable: str = "x") -> dict:
         }
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "input": equation, "error": str(exc)}
+
+
+# A thread can't be killed, so 9^9^9 would hold a threadpool slot forever. Tools
+# run in a child process that can be. forkserver keeps sympy preloaded on Linux;
+# Windows only has spawn, which re-imports sympy per call.
+_MP = mp.get_context("forkserver" if "forkserver" in mp.get_all_start_methods() else "spawn")
+if _MP.get_start_method() == "forkserver":
+    _MP.set_forkserver_preload(["app.tools"])
+
+
+def _limit_memory() -> None:
+    try:
+        import resource
+    except ImportError:  # Windows: only the timeout applies
+        return
+    limit = TOOL_MEMORY_MB * 1024 * 1024
+    resource.setrlimit(resource.RLIMIT_AS, (limit, limit))
+
+
+def _worker(conn, fn, args: tuple, kwargs: dict) -> None:
+    try:
+        _limit_memory()
+        conn.send(fn(*args, **kwargs))
+    except Exception as exc:  # noqa: BLE001 - e.g. the model omitted an argument
+        conn.send({"ok": False, "error": f"{type(exc).__name__}: {exc}"})
+
+
+def _bounded(fn, *args, **kwargs) -> dict:
+    """Run a tool in a child process, killing it after TOOL_TIMEOUT seconds."""
+    recv, send = _MP.Pipe(duplex=False)
+    proc = _MP.Process(target=_worker, args=(send, fn, args, kwargs), daemon=True)
+    proc.start()
+    send.close()
+    try:
+        if recv.poll(TOOL_TIMEOUT):
+            return recv.recv()
+        return {"ok": False, "error": f"timed out after {TOOL_TIMEOUT:g}s"}
+    finally:
+        proc.kill()
+        proc.join()
+        recv.close()
 
 
 TOOL_SCHEMAS = [
@@ -160,5 +212,8 @@ TOOL_SCHEMAS = [
         },
     },
 ]
+
+calculate = partial(_bounded, _calculate)
+solve_equation = partial(_bounded, _solve_equation)
 
 TOOL_IMPLS = {"calculate": calculate, "solve_equation": solve_equation}
