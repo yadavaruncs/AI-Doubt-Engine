@@ -4,11 +4,13 @@ import json
 from types import SimpleNamespace as NS
 
 import pytest
+import yaml
 from fastapi.testclient import TestClient
 
 import app.graph as graph
 import app.main as main
 from app.cache import SemanticCache
+from app.config import ROOT
 from app.llm import Completion
 
 
@@ -137,7 +139,7 @@ def test_no_history_skips_the_condense_call(monkeypatch, seeded_store):
 def api(monkeypatch):
     monkeypatch.setattr(main, "CACHE", SemanticCache(max_size=8, threshold=0.99))
     monkeypatch.setattr(main, "_LATENCIES", main.deque(maxlen=500))
-    monkeypatch.setattr(main, "_rate_counts", main.Counter())
+    monkeypatch.setattr(main, "_rate_hits", {})
     return TestClient(main.app)
 
 
@@ -199,8 +201,115 @@ def test_api_key_required_when_configured(api, monkeypatch):
     assert ok.status_code == 200
 
 
+def test_missing_api_key_header_is_401_and_never_reaches_the_graph(api, monkeypatch):
+    calls = _stub_graph(monkeypatch)
+    monkeypatch.setattr(main, "API_KEY", "secret")
+    assert api.post("/ask", json={"question": "q"}).status_code == 401
+    assert calls == []
+
+
+def test_non_ascii_api_key_is_a_401_not_a_crash(api, monkeypatch):
+    _stub_graph(monkeypatch)
+    monkeypatch.setattr(main, "API_KEY", "secret")
+    headers = {"X-API-Key": "é".encode("latin-1")}
+    response = api.post("/ask", json={"question": "q"}, headers=headers)
+    assert response.status_code == 401
+
+
 def test_rate_limit(api, monkeypatch):
     _stub_graph(monkeypatch)
     monkeypatch.setattr(main, "RATE_LIMIT_PER_MIN", 2)
     codes = [api.post("/ask", json={"question": "q"}).status_code for _ in range(3)]
     assert codes == [200, 200, 429]
+
+
+def test_rate_limit_slides_instead_of_resetting(api, monkeypatch):
+    _stub_graph(monkeypatch)
+    monkeypatch.setattr(main, "RATE_LIMIT_PER_MIN", 2)
+    clock = [1000.0]
+    monkeypatch.setattr(main.time, "monotonic", lambda: clock[0])
+
+    def post() -> int:
+        return api.post("/ask", json={"question": "q"}).status_code
+
+    assert post() == 200
+    clock[0] = 1059.0
+    assert post() == 200
+    clock[0] = 1059.5  # would be a new clock-minute, but both hits are within 60s
+    assert post() == 429
+    clock[0] = 1060.5  # the first hit has aged out
+    assert post() == 200
+
+
+def test_rate_limit_holds_across_a_minute_boundary(api, monkeypatch):
+    _stub_graph(monkeypatch)
+    monkeypatch.setattr(main, "RATE_LIMIT_PER_MIN", 5)
+    clock = [1075.0]  # 1080 is a clock-minute boundary, where the old counter reset
+
+    def now() -> float:
+        return clock[0]
+
+    monkeypatch.setattr(main, "time", NS(time=now, monotonic=now, perf_counter=now))
+
+    codes = []
+    for _ in range(10):
+        codes.append(api.post("/ask", json={"question": "q"}).status_code)
+        clock[0] += 1
+    assert codes == [200] * 5 + [429] * 5
+
+
+def test_rate_limit_forgets_quiet_ips(api, monkeypatch):
+    _stub_graph(monkeypatch)
+    monkeypatch.setattr(main, "_RATE_MAX_IPS", 2)
+    monkeypatch.setattr(main.time, "monotonic", lambda: 1000.0)
+    main._rate_hits.update({"a": main.deque([1.0]), "b": main.deque([2.0])})
+    assert api.post("/ask", json={"question": "q"}).status_code == 200
+    assert "a" not in main._rate_hits and "b" not in main._rate_hits
+
+
+def test_refuses_to_boot_without_api_key_unless_allowed(monkeypatch):
+    monkeypatch.setattr(main, "API_KEY", "")
+    monkeypatch.setattr(main, "ALLOW_UNAUTHENTICATED", False)
+    with pytest.raises(RuntimeError, match="API_KEY"):
+        with TestClient(main.app):
+            pass
+    monkeypatch.setattr(main, "ensure_collection", lambda: None)
+    monkeypatch.setattr(main, "ALLOW_UNAUTHENTICATED", True)
+    with TestClient(main.app):
+        pass
+
+
+def test_cache_finds_best_match_and_drops_expired(monkeypatch):
+    vectors = {"a": [1.0, 0.0], "b": [0.0, 2.0], "near b": [0.0, 1.0], "zero": [0.0, 0.0]}
+    monkeypatch.setattr("app.cache.embed_dense_one", lambda q: vectors[q])
+    cache = SemanticCache(max_size=2, threshold=0.9, ttl=100)
+    assert cache.get("a") is None  # empty cache
+
+    cache.put("a", {"answer": "A"})
+    cache.put("b", {"answer": "B"})
+    assert cache.get("near b")["answer"] == "B"
+    assert cache.get("zero") is None
+
+    vectors["c"] = [-1.0, 0.0]
+    cache.put("c", {"answer": "C"})  # evicts "a", the least recently used
+    assert cache.get("a") is None
+
+    monkeypatch.setattr("app.cache.time.monotonic", lambda: 1e12)
+    assert cache.get("b") is None
+    assert cache.stats()["entries"] == 0
+
+
+def _env_value(name: str) -> str:
+    lines = (ROOT / ".env.example").read_text(encoding="utf-8").splitlines()
+    return next(line.split("=", 1)[1] for line in lines if line.startswith(f"{name}="))
+
+
+def test_env_example_starts_with_a_key_and_says_to_replace_it():
+    assert len(_env_value("API_KEY")) >= 32
+    assert "replace API_KEY" in (ROOT / "README.md").read_text(encoding="utf-8")
+
+
+def test_qdrant_is_not_published_to_the_host():
+    compose = yaml.safe_load((ROOT / "docker-compose.yml").read_text(encoding="utf-8"))
+    assert "ports" not in compose["services"]["qdrant"]
+    assert compose["services"]["api"]["environment"]["QDRANT_URL"] == "http://qdrant:6333"

@@ -68,7 +68,7 @@ A **semantic cache** sits in front of the whole graph: questions within a cosine
 ## Quick start
 
 ```bash
-cp .env.example .env     # add your LLM key, or point at local Ollama
+cp .env.example .env     # add your LLM key (or point at local Ollama) and replace API_KEY
 docker compose up --build -d
 
 # add your source material, then index it
@@ -84,10 +84,14 @@ Without Docker:
 ```bash
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-docker run -p 6333:6333 qdrant/qdrant   # just the vector store
+docker run -p 127.0.0.1:6333:6333 qdrant/qdrant   # just the vector store
 python -m app.ingest --path data/
-uvicorn app.main:app --reload
+ALLOW_UNAUTHENTICATED=1 uvicorn app.main:app --reload   # allows an empty API_KEY, local use only
 ```
+
+**Replace the example key.** `API_KEY` in `.env.example` is public, so anyone can use it. Generate your own with `python -c "import secrets; print(secrets.token_urlsafe(32))"`. The API refuses to start with an empty key unless `ALLOW_UNAUTHENTICATED=1` is set, which is for local use only. Clients send the key in the `X-API-Key` header.
+
+Under Compose, Qdrant has no host port: only the other containers can reach it, so run ingest with `docker compose exec` as above.
 
 Point IDs are derived from chunk content, so re-running ingest overwrites instead of duplicating. Use `--recreate` whenever a source file is edited or removed, otherwise its old chunks stay.
 
