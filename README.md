@@ -1,8 +1,8 @@
 # AI Doubt Engine
 
-A retrieval-augmented physics tutor built the way a production AI system is built: hybrid retrieval, cross-encoder reranking, a tool-using agent that refuses to do its own arithmetic, and an **ablation harness that proves each of those choices earns its place.**
+A retrieval-augmented physics tutor built the way a production AI system is built: hybrid retrieval, cross-encoder reranking, a tool-using agent that refuses to do its own arithmetic, and an **ablation harness that measures whether each of those choices earns its place.** One of them didn't — see [Results](#results).
 
-> **Status: scaffold.** The pipeline runs end to end. The numbers in the results table below are placeholders until you run the eval against your own corpus. Replace them before putting this on a resume — see [Make it yours](#make-it-yours).
+Indexed corpus: [OpenStax *College Physics 2e*](https://openstax.org/details/books/college-physics-2e) (CC BY-NC-SA 4.0), 6,176 chunks. Eval: 75 scored questions plus 5 out-of-scope.
 
 ---
 
@@ -57,7 +57,7 @@ A **semantic cache** sits in front of the whole graph: questions within a cosine
 | Decision | Why | Alternative rejected |
 |---|---|---|
 | RRF fusion in Qdrant | Fuses dense + sparse ranks server-side; one round trip | Fusing in Python — slower, more code |
-| Cross-encoder rerank | Reads query and passage jointly; large precision gain | Trusting bi-encoder distance |
+| Cross-encoder rerank | Reads query and passage jointly. On this corpus it did *not* beat hybrid alone (see Results), so it is a switch, not a given | Trusting bi-encoder distance |
 | Route *before* retrieving | Out-of-scope messages never touch the vector store | Always retrieving — wasted cost |
 | SymPy via tool calling | Deterministic arithmetic, auditable steps | Letting the LLM compute |
 | Semantic, not exact, cache | Students rephrase constantly | `dict[question]` — near-zero hit rate |
@@ -71,8 +71,8 @@ A **semantic cache** sits in front of the whole graph: questions within a cosine
 cp .env.example .env     # add your LLM key (or point at local Ollama) and replace API_KEY
 docker compose up --build -d
 
-# add your source material, then index it
-cp /path/to/physics.pdf data/
+# fetch the corpus the results were measured on, then index it
+curl -L -o data/college-physics-2e.pdf https://assets.openstax.org/oscms-prodcms/media/documents/college-physics-2e_-_WEB.pdf
 docker compose exec api python -m app.ingest --path data/ --recreate
 
 open http://localhost:8501     # Streamlit UI
@@ -89,7 +89,9 @@ python -m app.ingest --path data/
 ALLOW_UNAUTHENTICATED=1 uvicorn app.main:app --reload   # allows an empty API_KEY, local use only
 ```
 
-**Replace the example key.** `API_KEY` in `.env.example` is public, so anyone can use it. Generate your own with `python -c "import secrets; print(secrets.token_urlsafe(32))"`. The API refuses to start with an empty key unless `ALLOW_UNAUTHENTICATED=1` is set, which is for local use only. Clients send the key in the `X-API-Key` header.
+**Replace the example key.** `API_KEY` in `.env.example` is public, so the API refuses to start with it. Generate your own with `python -c "import secrets; print(secrets.token_urlsafe(32))"`. It also refuses an empty key unless `ALLOW_UNAUTHENTICATED=1` is set, which is for local use only. Clients send the key in the `X-API-Key` header.
+
+Behind a reverse proxy, set `FORWARDED_ALLOW_IPS` to the proxy's IP, otherwise all clients share one rate limit. The limit is per process, so running several replicas multiplies it.
 
 Under Compose, Qdrant has no host port: only the other containers can reach it, so run ingest with `docker compose exec` as above.
 
@@ -112,18 +114,31 @@ pip install -r requirements-eval.txt
 python -m eval.run_eval --dataset eval/dataset.jsonl
 ```
 
-It runs the same questions through four configurations and writes `eval/results.csv`:
+It runs the same questions through four configurations and writes [eval/results.csv](eval/results.csv), plus [eval/per_question.csv](eval/per_question.csv) with the rank of the first relevant chunk for every question and config.
 
-| config | hit_rate@4 | mrr | faithfulness | p95 retrieval |
-|---|---|---|---|---|
-| dense_only | — | — | — | — |
-| dense_rerank | — | — | — | — |
-| hybrid_only | — | — | — | — |
-| hybrid_rerank | — | — | — | — |
+A retrieved chunk counts as relevant if it contains one of the question's `must_contain` phrases (case, whitespace and apostrophe style normalised). Every phrase was checked against the book text before the run, and the dataset was frozen before any config was scored. Questions are tagged `term` (uses the textbook's wording, 43) or `paraphrase` (a student's wording that avoids the term, 32).
 
-**The delta between `dense_only` and `hybrid_rerank` is your headline number.** Fill this table in from your own run. An interviewer will ask you to explain it, so make sure you can — including the cases where reranking *didn't* help.
+### Results
 
-`eval/dataset.jsonl` ships with 10 starter questions. Expand it to 50+ against your corpus; below ~30 the metrics are noise.
+Measured 2026-11-13 on CPU: fastembed `bge-small-en-v1.5` + `Qdrant/bm25`, reranker `ms-marco-MiniLM-L-6-v2`, 20 candidates → top 4.
+
+| config | hit_rate@4 | MRR | hit_rate@4 (paraphrase) | MRR (paraphrase) | p95 retrieval |
+|---|---|---|---|---|---|
+| dense_only | 0.920 | 0.798 | 0.844 | 0.625 | 2.16 s |
+| dense_rerank | 0.907 | 0.809 | 0.844 | 0.661 | 2.98 s |
+| **hybrid_only** | **0.947** | **0.859** | **0.938** | 0.732 | 2.15 s |
+| hybrid_rerank | 0.947 | 0.838 | 0.938 | **0.734** | 3.05 s |
+
+What it showed:
+
+- **Hybrid search is the win, and it comes from paraphrased questions.** On textbook-term questions dense retrieval already hits 97.7%, so there is little to gain. On paraphrases, adding BM25 lifts hit rate from 84% to 94% and MRR from 0.63 to 0.73. For example, "Why is the sky blue?" moves from rank 4 to rank 1 and "Why can some insects walk on water?" from rank 2 to rank 1. Paraphrases still share some content words with the right passage, and BM25 rewards those words where the small dense model drifts to related topics.
+- **The cross-encoder did not earn its latency here.** On top of hybrid it improved 7 questions and worsened 11, MRR fell from 0.859 to 0.838, and it added about 0.9 s at p95 on CPU. A likely cause, not yet verified: the reranker was trained on web search queries and favours the book's end-of-chapter exercises, which echo a student's wording, over the explanatory passage. The next experiment is to tag chunks by section type and rerank only explanatory text, or to try a larger reranker.
+- **Numeric questions are the weak spot.** Three of hybrid_rerank's four misses are numeric ("dropped from a 20 m tower", "2 kg at 10 m/s", "heat 1 kg of water"). The numbers and setup match worked examples about *other* values, not the section that states the formula. The kinetic-energy question was missed by every config.
+- **These are directions, not proof.** Hybrid vs dense: 14 questions better, 7 worse (two-sided sign test p ≈ 0.19). Hybrid_rerank vs hybrid: 7 better, 11 worse (p ≈ 0.48). With 75 questions, a difference of a few questions is within noise.
+
+Caveats: the index stops at page 1479 of 1671, because ingest was cut short. That drops the second half of chapter 32 (nuclear fission and fusion), chapters 33–34 and the appendices, though every scored question still has a matching passage in the index. Latency was measured while the API was also serving requests, so read it as relative, not absolute. RAGAS answer metrics (faithfulness and others) have not been run: the free Groq tier's 1,000 requests a day does not cover about 3,000 judge calls.
+
+Run on a different corpus or change a setting (`DENSE_MODEL`, `CHUNK_SIZE`, `CANDIDATES_K`) and re-measure. `per_question.csv` shows which questions moved.
 
 ---
 
@@ -151,25 +166,21 @@ app/
   ingest.py      PDF/text → paragraph-aware chunks → Qdrant
   main.py        FastAPI: /ask /healthz /metrics
 eval/
-  dataset.jsonl  golden questions with must_contain keys
+  dataset.jsonl  80 golden questions with must_contain keys and term/paraphrase tags
   run_eval.py    four-way ablation harness
+  results.csv    the numbers in the Results table
+  per_question.csv  first-relevant rank per question and config
 tests/           offline test suite
 ui/              Streamlit front end showing sources, route, latency
 ```
 
 ---
 
-## Make it yours
+## Next steps
 
-This scaffold is a starting point, not a finished portfolio piece. To make it genuinely yours:
-
-1. **Use a corpus you care about.** NCERT, your own class notes, a specific JEE topic. The source material is what makes the project specific rather than generic.
-2. **Expand the eval set to 50+ questions** with real `must_contain` keys, and run it. Record the numbers.
-3. **Then change something and re-measure.** Try a different embedding model, chunk size, or `CANDIDATES_K`. The story "I tried X, it helped by N%, here's why" is worth more than any feature you add.
-4. **Write up what didn't work.** The honest failure analysis is the most convincing section of any project README.
-5. Replace the placeholder table above with your real results and delete this section.
-
-### Worthwhile extensions
+- Run RAGAS (faithfulness, answer relevancy, context precision) with a paid key
+- Rerank only explanatory sections, or try a larger cross-encoder, and re-measure against `hybrid_only`
+- Expand the numeric questions, the weakest category
 - Handwritten-answer grading with rubric-based scoring and agreement (Cohen's κ) against human scores
 - Multimodal doubts: a student photographs a problem and the system reads the diagram
 - Redis-backed shared semantic cache for multi-replica deployment

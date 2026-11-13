@@ -21,6 +21,7 @@ import time
 from typing import Annotated, Literal, TypedDict
 
 from langgraph.graph import END, START, StateGraph
+from openai import BadRequestError
 
 from app.config import LLM_MODEL, ROUTER_MODEL
 from app.llm import client, complete
@@ -149,16 +150,31 @@ def numeric_node(state: DoubtState) -> DoubtState:
 
     for round_no in range(1, MAX_TOOL_ROUNDS + 1):
         started = time.perf_counter()
-        resp = client().chat.completions.create(
-            model=LLM_MODEL,
-            messages=messages,
-            tools=TOOL_SCHEMAS,
-            # Last round must answer, or the final tool results are never read.
-            tool_choice="none" if round_no == MAX_TOOL_ROUNDS else "auto",
-            temperature=0.1,
-            max_tokens=900,
-        )
-        elapsed += (time.perf_counter() - started) * 1000
+        try:
+            resp = client().chat.completions.create(
+                model=LLM_MODEL,
+                messages=messages,
+                tools=TOOL_SCHEMAS,
+                # Last round must answer, or the final tool results are never read.
+                tool_choice="none" if round_no == MAX_TOOL_ROUNDS else "auto",
+                temperature=0.1,
+                max_tokens=900,
+            )
+        except BadRequestError as exc:
+            # Groq rejects a call to an unknown tool server-side instead of returning
+            # it, so report it like any bad tool call and let the model retry.
+            if exc.code != "tool_use_failed":
+                raise
+            messages.append(
+                {
+                    "role": "user",
+                    "content": f"Your tool call was rejected: {exc.message} "
+                    f"Use only these tools: {', '.join(TOOL_IMPLS)}.",
+                }
+            )
+            continue
+        finally:
+            elapsed += (time.perf_counter() - started) * 1000
         usage = getattr(resp, "usage", None)
         p_tokens += getattr(usage, "prompt_tokens", 0) or 0
         c_tokens += getattr(usage, "completion_tokens", 0) or 0

@@ -163,11 +163,16 @@ def test_cache_never_matches_a_non_positive_similarity(monkeypatch):
 
 
 def test_cache_ties_go_to_the_least_recently_used_entry(monkeypatch):
-    # This seed and row count make BLAS split identical rows by one ulp.
-    same = np.random.default_rng(4).normal(size=384).tolist()
-    questions = "abcdefg"
-    cache = _cache_with_vectors(monkeypatch, dict.fromkeys(questions, same), threshold=0.9)
-    for question in questions:
-        cache.put(question, {"answer": question})
-    answers = [cache.get("a")["answer"] for _ in range(len(questions) + 1)]
-    assert answers == [*questions, "a"]
+    # "a" and "b" differ by a few ulps of cosine, like identical rows split by BLAS.
+    vectors = {"a": [1.0, 3e-8], "b": [1.0, 0.0]}
+    cache = _cache_with_vectors(monkeypatch, vectors, threshold=0.9)
+    cache.put("a", {"answer": "A"})
+    cache.put("b", {"answer": "B"})
+    assert [cache.get("b")["answer"] for _ in range(3)] == ["A", "B", "A"]
+
+
+def test_eval_key_matches_across_pdf_line_breaks_and_curly_apostrophes():
+    from eval.run_eval import _contains
+
+    assert _contains("by Newton’s first\nlaw, a body", ["newton's first law"])
+    assert not _contains("Newton's second law", ["newton's first law"])

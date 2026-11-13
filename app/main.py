@@ -26,6 +26,7 @@ from app.config import (
     API_KEY,
     COLLECTION,
     CORS_ORIGINS,
+    EXAMPLE_API_KEY,
     RATE_LIMIT_PER_MIN,
 )
 from app.graph import GRAPH
@@ -36,6 +37,8 @@ logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
+    if API_KEY == EXAMPLE_API_KEY:
+        raise RuntimeError("API_KEY is the public example from .env.example. Replace it.")
     if not API_KEY and not ALLOW_UNAUTHENTICATED:
         raise RuntimeError(
             "API_KEY is empty, so /ask would be open. "
@@ -123,8 +126,9 @@ def guard(request: Request, x_api_key: str = Header(default="")) -> None:
         raise HTTPException(401, "Missing or invalid X-API-Key.")
     if not RATE_LIMIT_PER_MIN:
         return
-    # shortcut: per-process and keyed on the direct peer, so a reverse proxy makes
-    # all students one client; use the gateway's limiter once there is one.
+    # Behind a reverse proxy, set FORWARDED_ALLOW_IPS so uvicorn puts the real client here.
+    # shortcut: per-process, so N replicas allow N times the limit; use the gateway's
+    # limiter once there is more than one.
     ip = request.client.host if request.client else "unknown"
     now = time.monotonic()
     window_start = now - 60

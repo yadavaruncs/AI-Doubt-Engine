@@ -40,13 +40,20 @@ def load_dataset(path: Path) -> list[dict]:
     return rows
 
 
+def _norm(text: str) -> str:
+    # PDF text breaks phrases across lines and uses curly apostrophes.
+    return " ".join(text.lower().replace("’", "'").split())
+
+
 def _contains(hit_text: str, needles: list[str]) -> bool:
-    low = hit_text.lower()
-    return any(n.lower() in low for n in needles)
+    low = _norm(hit_text)
+    return any(_norm(n) in low for n in needles)
 
 
-def retrieval_scores(rows: list[dict], cfg: dict) -> dict:
-    """Hit-rate@k and MRR against the `must_contain` keys in the dataset."""
+def retrieval_scores(rows: list[dict], cfg: dict, ranks: list | None = None) -> dict:
+    """Hit-rate@k and MRR against the `must_contain` keys in the dataset.
+
+    If `ranks` is given, each question's first-hit rank (None = miss) is appended."""
     hits_at_k, reciprocal_ranks, latencies = [], [], []
 
     for row in rows:
@@ -61,6 +68,8 @@ def retrieval_scores(rows: list[dict], cfg: dict) -> dict:
             (i for i, h in enumerate(results, start=1) if _contains(h.text, needles)),
             None,
         )
+        if ranks is not None:
+            ranks.append(rank)
         hits_at_k.append(1 if rank else 0)
         reciprocal_ranks.append(1 / rank if rank else 0.0)
 
@@ -139,10 +148,11 @@ def main() -> None:
     rows = load_dataset(Path(args.dataset))
     print(f"Loaded {len(rows)} eval questions.\n")
 
-    table = []
+    table, ranks = [], {}
     for name, cfg in CONFIGS.items():
         print(f"--- {name} ---")
-        scores = {"config": name, **retrieval_scores(rows, cfg)}
+        ranks[name] = []
+        scores = {"config": name, **retrieval_scores(rows, cfg, ranks[name])}
         if not args.no_ragas:
             scores.update(ragas_scores(rows, cfg))
         table.append(scores)
@@ -157,6 +167,18 @@ def main() -> None:
         writer.writeheader()
         writer.writerows(table)
     print(f"Wrote {out}")
+
+    # First-hit rank per question and config, for failure analysis.
+    scored = [r for r in rows if r.get("must_contain")]
+    per_q = out.with_name("per_question.csv")
+    with per_q.open("w", newline="", encoding="utf-8") as fh:
+        writer = csv.writer(fh)
+        writer.writerow(["question", "style", *CONFIGS])
+        for i, row in enumerate(scored):
+            writer.writerow(
+                [row["question"], row.get("style", ""), *(ranks[c][i] or "" for c in CONFIGS)]
+            )
+    print(f"Wrote {per_q}")
     print(
         "\nPut the hybrid_rerank vs dense_only delta in your README and your resume.\n"
         "That delta is the number an interviewer will ask you to explain."

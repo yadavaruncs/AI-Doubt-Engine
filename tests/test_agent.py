@@ -3,14 +3,17 @@
 import json
 from types import SimpleNamespace as NS
 
+import httpx
+import openai
 import pytest
 import yaml
 from fastapi.testclient import TestClient
+from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 
 import app.graph as graph
 import app.main as main
 from app.cache import SemanticCache
-from app.config import ROOT
+from app.config import EXAMPLE_API_KEY, ROOT
 from app.llm import Completion
 
 
@@ -30,6 +33,8 @@ class ScriptedLLM:
     def _create(self, **kwargs):
         self.requests.append(kwargs)
         msg = self.script.pop(0) if len(self.script) > 1 else self.script[0]
+        if isinstance(msg, Exception):
+            raise msg
         return NS(choices=[NS(message=msg)], usage=None)
 
 
@@ -54,6 +59,24 @@ def test_bad_tool_call_is_reported_to_the_model(monkeypatch, name, arguments):
     assert state["answer"] == "done"
     assert state["tool_calls"][0]["result"]["ok"] is False
     assert json.loads(llm.requests[1]["messages"][-1]["content"])["ok"] is False
+
+
+def _provider_400(code: str) -> openai.BadRequestError:
+    response = httpx.Response(400, request=httpx.Request("POST", "http://llm"))
+    return openai.BadRequestError("rejected", response=response, body={"code": code})
+
+
+def test_provider_rejected_tool_call_is_reported_to_the_model(monkeypatch):
+    state, llm = _run_numeric(
+        monkeypatch, _provider_400("tool_use_failed"), NS(content="done", tool_calls=None)
+    )
+    assert state["answer"] == "done"
+    assert "calculate" in llm.requests[1]["messages"][-1]["content"]
+
+
+def test_other_provider_errors_still_raise(monkeypatch):
+    with pytest.raises(openai.BadRequestError):
+        _run_numeric(monkeypatch, _provider_400("context_length_exceeded"))
 
 
 def test_missing_tool_argument_is_reported_to_the_model(monkeypatch):
@@ -258,6 +281,26 @@ def test_rate_limit_holds_across_a_minute_boundary(api, monkeypatch):
     assert codes == [200] * 5 + [429] * 5
 
 
+def _post_from(client_ip: str, trusted_proxy: str) -> int:
+    proxied = TestClient(ProxyHeadersMiddleware(main.app, trusted_hosts=trusted_proxy))
+    headers = {"X-Forwarded-For": client_ip}
+    return proxied.post("/ask", json={"question": "q"}, headers=headers).status_code
+
+
+def test_rate_limit_is_per_client_behind_a_trusted_proxy(api, monkeypatch):
+    _stub_graph(monkeypatch)
+    monkeypatch.setattr(main, "RATE_LIMIT_PER_MIN", 1)
+    codes = [_post_from(ip, "testclient") for ip in ("1.1.1.1", "2.2.2.2", "1.1.1.1")]
+    assert codes == [200, 200, 429]
+
+
+def test_rate_limit_ignores_forwarded_ip_from_an_untrusted_peer(api, monkeypatch):
+    _stub_graph(monkeypatch)
+    monkeypatch.setattr(main, "RATE_LIMIT_PER_MIN", 1)
+    codes = [_post_from(ip, "10.0.0.1") for ip in ("1.1.1.1", "2.2.2.2")]
+    assert codes == [200, 429]
+
+
 def test_rate_limit_forgets_quiet_ips(api, monkeypatch):
     _stub_graph(monkeypatch)
     monkeypatch.setattr(main, "_RATE_MAX_IPS", 2)
@@ -277,6 +320,14 @@ def test_refuses_to_boot_without_api_key_unless_allowed(monkeypatch):
     monkeypatch.setattr(main, "ALLOW_UNAUTHENTICATED", True)
     with TestClient(main.app):
         pass
+
+
+def test_refuses_to_boot_with_the_example_key_even_if_unauthenticated_is_allowed(monkeypatch):
+    monkeypatch.setattr(main, "API_KEY", EXAMPLE_API_KEY)
+    monkeypatch.setattr(main, "ALLOW_UNAUTHENTICATED", True)
+    with pytest.raises(RuntimeError, match="example"):
+        with TestClient(main.app):
+            pass
 
 
 def test_cache_finds_best_match_and_drops_expired(monkeypatch):
@@ -306,6 +357,7 @@ def _env_value(name: str) -> str:
 
 def test_env_example_starts_with_a_key_and_says_to_replace_it():
     assert len(_env_value("API_KEY")) >= 32
+    assert _env_value("API_KEY") == EXAMPLE_API_KEY  # or the startup check stops matching
     assert "replace API_KEY" in (ROOT / "README.md").read_text(encoding="utf-8")
 
 
