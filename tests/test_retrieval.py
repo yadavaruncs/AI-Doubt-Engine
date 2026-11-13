@@ -1,5 +1,6 @@
 """Retrieval, chunking and cache behaviour, all offline."""
 
+import numpy as np
 import pytest
 
 from app.cache import SemanticCache
@@ -123,3 +124,55 @@ def test_cache_entries_expire():
     cache.put("what is inertia", {"answer": "A"})
     assert cache.get("what is inertia") is None
     assert cache.stats()["entries"] == 0
+
+
+def _cache_with_vectors(monkeypatch, vectors, **kwargs):
+    monkeypatch.setattr("app.cache.embed_dense_one", lambda question: vectors[question])
+    return SemanticCache(**{"max_size": 8, **kwargs})
+
+
+def test_cache_lookup_searches_one_matrix_of_unit_rows(monkeypatch):
+    vectors = {"a": [3.0, 0.0], "b": [0.0, 5.0], "near b": [0.1, 2.0], "miss": [-1.0, 0.0]}
+    cache = _cache_with_vectors(monkeypatch, vectors, threshold=0.9)
+    cache.put("a", {"answer": "A"})
+    cache.put("b", {"answer": "B"})
+    assert cache.get("near b")["answer"] == "B"
+
+    assert cache.get("miss") is None  # a hit drops the matrix, a miss leaves it readable
+    _, _, matrix = cache._snapshot
+    assert matrix.shape == (2, 2)
+    assert np.allclose(np.linalg.norm(matrix, axis=1), 1.0)
+
+
+def test_cache_lookup_sees_entries_added_after_the_matrix_was_built(monkeypatch):
+    vectors = {"a": [1.0, 0.0], "b": [0.0, 1.0]}
+    cache = _cache_with_vectors(monkeypatch, vectors, threshold=0.9)
+    cache.put("a", {"answer": "A"})
+    assert cache.get("b") is None  # builds the matrix
+    cache.put("b", {"answer": "B"})
+    assert cache.get("b")["answer"] == "B"
+
+
+def test_cache_never_matches_a_non_positive_similarity(monkeypatch):
+    vectors = {"a": [1.0, 0.0], "opposite": [-1.0, 0.0], "right": [0.0, 1.0], "zero": [0.0, 0.0]}
+    cache = _cache_with_vectors(monkeypatch, vectors, threshold=-1.0)
+    cache.put("a", {"answer": "A"})
+    assert cache.get("opposite") is None
+    assert cache.get("right") is None
+    assert cache.get("zero") is None
+
+
+def test_cache_ties_go_to_the_least_recently_used_entry(monkeypatch):
+    # "a" and "b" differ by a few ulps of cosine, like identical rows split by BLAS.
+    vectors = {"a": [1.0, 3e-8], "b": [1.0, 0.0]}
+    cache = _cache_with_vectors(monkeypatch, vectors, threshold=0.9)
+    cache.put("a", {"answer": "A"})
+    cache.put("b", {"answer": "B"})
+    assert [cache.get("b")["answer"] for _ in range(3)] == ["A", "B", "A"]
+
+
+def test_eval_key_matches_across_pdf_line_breaks_and_curly_apostrophes():
+    from eval.run_eval import _contains
+
+    assert _contains("by Newton’s first\nlaw, a body", ["newton's first law"])
+    assert not _contains("Newton's second law", ["newton's first law"])

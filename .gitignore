@@ -9,7 +9,6 @@ env/
 .ruff_cache/
 data/*
 !data/.gitkeep
-eval/results.csv
 qdrant_storage/
 .DS_Store
 .idea/

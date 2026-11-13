@@ -1,0 +1,5 @@
+config,hit_rate@4,mrr,n,retrieval_p95_ms
+dense_only,0.92,0.7978,75,2159.0
+dense_rerank,0.9067,0.8089,75,2979.4
+hybrid_only,0.9467,0.8589,75,2152.4
+hybrid_rerank,0.9467,0.8378,75,3054.2

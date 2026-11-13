@@ -11,7 +11,7 @@ import hmac
 import logging
 import threading
 import time
-from collections import Counter, deque
+from collections import deque
 from contextlib import asynccontextmanager
 from statistics import median
 from typing import Literal
@@ -21,7 +21,14 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from app.cache import CACHE
-from app.config import API_KEY, COLLECTION, CORS_ORIGINS, RATE_LIMIT_PER_MIN
+from app.config import (
+    ALLOW_UNAUTHENTICATED,
+    API_KEY,
+    COLLECTION,
+    CORS_ORIGINS,
+    EXAMPLE_API_KEY,
+    RATE_LIMIT_PER_MIN,
+)
 from app.graph import GRAPH
 from app.store import client, ensure_collection
 
@@ -30,6 +37,13 @@ logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
+    if API_KEY == EXAMPLE_API_KEY:
+        raise RuntimeError("API_KEY is the public example from .env.example. Replace it.")
+    if not API_KEY and not ALLOW_UNAUTHENTICATED:
+        raise RuntimeError(
+            "API_KEY is empty, so /ask would be open. "
+            "Set it, or ALLOW_UNAUTHENTICATED=1 for local use."
+        )
     try:
         ensure_collection()
     except Exception as exc:  # noqa: BLE001 - don't crash-loop if Qdrant is slow to boot
@@ -47,8 +61,8 @@ app.add_middleware(
 
 _LATENCIES: deque[float] = deque(maxlen=500)  # cache misses only, see ask()
 _rate_lock = threading.Lock()
-_rate_minute = 0
-_rate_counts: Counter[str] = Counter()
+_RATE_MAX_IPS = 10_000
+_rate_hits: dict[str, deque[float]] = {}  # client IP -> times of allowed requests
 
 
 class Turn(BaseModel):
@@ -108,21 +122,26 @@ def metrics() -> dict:
 
 def guard(request: Request, x_api_key: str = Header(default="")) -> None:
     """Every /ask spends LLM money, so it needs a key and a rate limit."""
-    global _rate_minute
-    if API_KEY and not hmac.compare_digest(x_api_key, API_KEY):
+    if API_KEY and not hmac.compare_digest(x_api_key.encode(), API_KEY.encode()):
         raise HTTPException(401, "Missing or invalid X-API-Key.")
     if not RATE_LIMIT_PER_MIN:
         return
-    # shortcut: per-process and keyed on the direct peer, so a reverse proxy makes
-    # all students one client; use the gateway's limiter once there is one.
+    # Behind a reverse proxy, set FORWARDED_ALLOW_IPS so uvicorn puts the real client here.
+    # shortcut: per-process, so N replicas allow N times the limit; use the gateway's
+    # limiter once there is more than one.
     ip = request.client.host if request.client else "unknown"
-    minute = int(time.time() // 60)
+    now = time.monotonic()
+    window_start = now - 60
     with _rate_lock:
-        if minute != _rate_minute:
-            _rate_minute = minute
-            _rate_counts.clear()
-        _rate_counts[ip] += 1
-        limited = _rate_counts[ip] > RATE_LIMIT_PER_MIN
+        hits = _rate_hits.setdefault(ip, deque())
+        while hits and hits[0] <= window_start:
+            hits.popleft()
+        limited = len(hits) >= RATE_LIMIT_PER_MIN
+        if not limited:
+            hits.append(now)
+        if len(_rate_hits) > _RATE_MAX_IPS:  # IPs that went quiet would otherwise stay forever
+            for key in [k for k, d in _rate_hits.items() if not d or d[-1] <= window_start]:
+                del _rate_hits[key]
     if limited:
         raise HTTPException(429, "Too many requests. Please wait a minute.")
 

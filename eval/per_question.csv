@@ -1,0 +1,76 @@
+question,style,dense_only,dense_rerank,hybrid_only,hybrid_rerank
+What is Newton's first law of motion?,term,1,1,1,1
+Why does a ball bounce lower each time it hits the ground?,paraphrase,,4,,
+A stone is dropped from a 20 m tower. What is its speed on hitting the ground? Take g = 9.8 m/s^2.,term,3,,,
+State the principle of conservation of linear momentum.,term,1,1,1,1
+Define the coefficient of restitution.,term,2,1,1,1
+What is the difference between scalar and vector quantities?,term,1,1,1,1
+Calculate the kinetic energy of a 2 kg object moving at 10 m/s.,term,,,,
+Why is the sky blue?,paraphrase,4,1,2,1
+State Ohm's law and its limitations.,term,1,1,1,1
+Why do passengers feel thrown outward when a car takes a sharp turn?,paraphrase,1,1,1,1
+What is terminal velocity?,term,2,1,1,1
+Why does a skydiver stop speeding up after falling for a while?,paraphrase,2,2,2,2
+What is the difference between static and kinetic friction?,term,1,1,1,1
+Why is it harder to start pushing a heavy box than to keep it moving?,paraphrase,2,1,1,1
+State the work-energy theorem.,term,1,1,1,1
+What is impulse and how is it related to momentum?,term,1,1,1,1
+Why do gymnasts land on thick mats instead of a hard floor?,paraphrase,1,1,1,3
+What does the lever arm have to do with torque?,term,1,1,1,1
+Why does a figure skater spin faster when she pulls her arms in?,paraphrase,2,2,2,2
+State Kepler's third law of planetary motion.,term,1,2,1,2
+What minimum launch speed does a rocket need to leave Earth's gravity for good?,paraphrase,2,1,1,1
+State Hooke's law.,term,1,1,1,1
+What does the period of a simple pendulum depend on?,term,1,1,1,1
+What is the period of a pendulum 1 m long? Take g = 9.8 m/s^2.,term,2,2,1,2
+How can a singer shatter a wine glass just with her voice?,paraphrase,4,2,2,2
+State Archimedes' principle.,term,1,1,1,1
+Why does a steel ship float when a steel nail sinks?,paraphrase,1,1,1,1
+State Pascal's principle.,term,1,1,1,1
+How does a hydraulic jack let a small force lift a whole car?,paraphrase,1,3,1,3
+How does an airplane wing produce lift?,paraphrase,2,2,1,2
+Why can some insects walk on the surface of water?,paraphrase,2,1,1,1
+What is viscosity?,term,1,1,1,1
+Define specific heat.,term,1,1,1,1
+Why does melting ice stay at 0 degrees Celsius even while heat is being added?,paraphrase,4,3,,3
+Why are small gaps left between sections of railway track or concrete bridges?,paraphrase,,,2,1
+State the ideal gas law.,term,1,1,1,1
+State the first law of thermodynamics.,term,1,1,1,1
+Why can no engine convert all of its heat into work?,paraphrase,1,1,2,1
+What is entropy?,term,1,1,1,1
+What are the three ways heat moves from one place to another?,paraphrase,1,1,1,1
+How much heat is needed to raise the temperature of 1 kg of water by 10 degrees Celsius?,paraphrase,2,,3,
+Why does an ambulance siren sound higher as it approaches and lower as it drives away?,paraphrase,1,1,1,1
+What are beats in sound?,term,1,1,1,1
+What is the decibel scale for sound?,term,1,1,1,1
+State Coulomb's law.,term,1,1,1,1
+Why do I get a small shock when I touch a doorknob after walking across a carpet?,paraphrase,,,2,1
+What is capacitance?,term,1,1,1,1
+What are Kirchhoff's rules for circuits?,term,1,1,1,1
+Why does a battery's voltage drop when it supplies a large current?,paraphrase,2,,4,1
+What is drift velocity?,term,1,1,1,1
+What is the equivalent resistance of a 4 ohm and a 6 ohm resistor connected in parallel?,term,1,1,1,1
+How do you find the direction of the magnetic force on a moving charge?,paraphrase,1,1,1,1
+State Faraday's law of induction.,term,1,1,1,1
+State Lenz's law.,term,1,1,1,1
+How does a transformer step up voltage?,term,1,1,1,1
+Why does a magnet dropped through a copper pipe fall so slowly?,paraphrase,1,2,1,2
+State Snell's law.,term,1,1,1,1
+How do optical fibers keep light trapped inside them?,paraphrase,1,1,1,1
+Why does a pencil look bent when it is partly in a glass of water?,paraphrase,,1,1,1
+Why does a prism split white light into a rainbow of colors?,paraphrase,1,4,2,4
+An object is 30 cm from a converging lens of focal length 10 cm. Where is the image?,term,1,2,1,3
+Why do soap bubbles show swirling colors?,paraphrase,1,1,2,1
+How do Polaroid sunglasses cut down glare from water?,paraphrase,1,1,1,1
+What kind of lens corrects nearsightedness?,term,1,1,1,1
+What is the photoelectric effect?,term,1,1,1,1
+Why does ultraviolet light knock electrons out of a metal when even very bright red light cannot?,paraphrase,,2,1,2
+What is the de Broglie wavelength?,term,1,1,1,1
+State the Heisenberg uncertainty principle.,term,1,1,1,1
+What is meant by the half-life of a radioactive substance?,term,1,1,1,1
+How do scientists work out how old ancient bones or wood are?,paraphrase,1,1,1,1
+What is the difference between nuclear fission and nuclear fusion?,term,1,1,1,1
+Where does the Sun get its energy from?,paraphrase,1,1,1,1
+What is time dilation?,term,1,1,1,1
+Why do muons created high in the atmosphere reach the ground even though they should decay first?,paraphrase,4,,3,4
+Describe the Bohr model of the hydrogen atom.,term,1,1,1,1

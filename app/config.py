@@ -45,5 +45,7 @@ SEMANTIC_CACHE_TTL = float(os.getenv("SEMANTIC_CACHE_TTL", "3600"))  # seconds
 
 # ---------------------------------------------------------------- API
 CORS_ORIGINS = os.getenv("CORS_ORIGINS", "http://localhost:8501").split(",")
-API_KEY = os.getenv("API_KEY", "")  # empty = no auth, for local development
+API_KEY = os.getenv("API_KEY", "")  # required unless ALLOW_UNAUTHENTICATED=1
+EXAMPLE_API_KEY = "i7R48FI6S1tD5DUcVQOxTcebStkrO-FMjkd9qzR5VYU"  # public, in .env.example
+ALLOW_UNAUTHENTICATED = os.getenv("ALLOW_UNAUTHENTICATED", "") == "1"
 RATE_LIMIT_PER_MIN = int(os.getenv("RATE_LIMIT_PER_MIN", "60"))  # per client IP, 0 = off
