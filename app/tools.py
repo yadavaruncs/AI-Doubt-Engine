@@ -7,6 +7,7 @@ the model only narrates the result.
 
 from __future__ import annotations
 
+import math
 import multiprocessing as mp
 import re
 from functools import partial
@@ -103,6 +104,8 @@ def _calculate(expression: str) -> dict:
             numeric = float(sp.N(exact))
         except (TypeError, ValueError):
             numeric = None
+        if numeric is not None and not math.isfinite(numeric):
+            numeric = None  # json.dumps would emit bare Infinity/NaN, which is invalid JSON
         return {
             "ok": True,
             "input": expression,
@@ -167,7 +170,10 @@ def _bounded(fn, *args, **kwargs) -> dict:
     send.close()
     try:
         if recv.poll(TOOL_TIMEOUT):
-            return recv.recv()
+            try:
+                return recv.recv()
+            except EOFError:  # child died without sending: signal, OOM kill, bootstrap failure
+                return {"ok": False, "error": "tool process exited without a result"}
         return {"ok": False, "error": f"timed out after {TOOL_TIMEOUT:g}s"}
     finally:
         proc.kill()

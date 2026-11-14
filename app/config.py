@@ -15,6 +15,11 @@ LLM_API_KEY = os.getenv("LLM_API_KEY", "")
 LLM_MODEL = os.getenv("LLM_MODEL", "gpt-4o-mini")
 ROUTER_MODEL = os.getenv("ROUTER_MODEL", LLM_MODEL)
 LLM_TIMEOUT = float(os.getenv("LLM_TIMEOUT", "60"))
+# RAGAS judge. Defaults to the answering model, which means self-evaluation;
+# point these at a different model for an unbiased faithfulness score.
+JUDGE_MODEL = os.getenv("JUDGE_MODEL", LLM_MODEL)
+JUDGE_BASE_URL = os.getenv("JUDGE_BASE_URL", LLM_BASE_URL)
+JUDGE_API_KEY = os.getenv("JUDGE_API_KEY", LLM_API_KEY)
 
 TOOL_TIMEOUT = float(os.getenv("TOOL_TIMEOUT", "5"))  # seconds per SymPy call
 TOOL_MEMORY_MB = int(os.getenv("TOOL_MEMORY_MB", "1024"))  # enforced on Linux only

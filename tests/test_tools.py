@@ -95,6 +95,23 @@ def test_runaway_solve_is_killed_too(monkeypatch):
     assert "timed out" in solve_equation("x = 9^9^9")["error"]
 
 
+def test_child_dying_without_a_result_fails_cleanly():
+    import os
+
+    result = app.tools._bounded(os._exit, 1)
+    assert not result["ok"]
+    assert "exited" in result["error"]
+
+
+def test_overflow_to_infinity_has_no_float_value():
+    import json
+
+    result = calculate("E**E**E**E")
+    assert result["ok"]
+    assert result["value"] is None
+    json.dumps(result, allow_nan=False)  # raises if inf/nan slipped through
+
+
 def test_wrong_tool_arguments_fail_cleanly():
     assert not calculate(wrong="1")["ok"]
 
