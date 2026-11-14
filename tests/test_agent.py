@@ -102,6 +102,7 @@ def test_last_round_must_answer_instead_of_calling_tools(monkeypatch):
         ("Category: out of scope", "q", "out_of_scope"),
         ("out-of-scope", "q", "out_of_scope"),
         ("not out of scope, this is conceptual", "q", "conceptual"),
+        ("Conceptual, not out-of-scope", "q", "conceptual"),
         ("no idea", "a 20 m tower", "numeric"),
         ("no idea", "what is inertia", "conceptual"),
     ],
@@ -109,6 +110,21 @@ def test_last_round_must_answer_instead_of_calling_tools(monkeypatch):
 def test_router_parsing(monkeypatch, output, question, label):
     monkeypatch.setattr(graph, "complete", lambda *a, **k: Completion(output, "m"))
     assert graph.route_node({"question": question})["route"] == label
+
+
+def test_judge_key_not_sent_to_another_endpoint(monkeypatch):
+    import importlib
+
+    import app.config as config
+
+    monkeypatch.setenv("LLM_API_KEY", "groq-secret")
+    monkeypatch.setenv("JUDGE_BASE_URL", "https://other.example/v1")
+    monkeypatch.delenv("JUDGE_API_KEY", raising=False)
+    try:
+        assert importlib.reload(config).JUDGE_API_KEY == ""
+    finally:
+        monkeypatch.undo()
+        importlib.reload(config)
 
 
 def test_retrieve_node_applies_ablation_config(monkeypatch):
