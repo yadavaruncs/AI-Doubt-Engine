@@ -1,0 +1,5 @@
+config,answer_relevancy,context_precision,faithfulness,hit_rate@4,mrr,n,retrieval_p95_ms
+dense_only,,,,0.92,0.8,25,97.6
+dense_rerank,,,,0.88,0.7933,25,1755.9
+hybrid_only,,,,0.92,0.83,25,85.4
+hybrid_rerank,0.7103,0.9289,0.7801,0.96,0.8667,25,1707.4

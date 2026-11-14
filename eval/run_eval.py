@@ -6,6 +6,7 @@ retrieval quality plus RAGAS answer-quality metrics side by side.
 
     python -m eval.run_eval --dataset eval/dataset.jsonl
     python -m eval.run_eval --dataset eval/dataset.jsonl --no-ragas   # retrieval only, no API cost
+    python -m eval.run_eval --dataset eval/dataset.jsonl --ragas-configs hybrid_rerank  # RAGAS on one config
 
 Output: eval/results.csv and a printed table.
 """
@@ -18,7 +19,7 @@ import json
 import time
 from pathlib import Path
 
-from app.config import FINAL_K, LLM_API_KEY, LLM_BASE_URL, LLM_MODEL
+from app.config import FINAL_K, JUDGE_API_KEY, JUDGE_BASE_URL, JUDGE_MODEL
 from app.embeddings import embed_dense, embed_dense_one
 from app.retrieval import retrieve
 
@@ -95,7 +96,7 @@ def ragas_scores(rows: list[dict], cfg: dict) -> dict:
     from datasets import Dataset
     from langchain_core.embeddings import Embeddings
     from langchain_openai import ChatOpenAI
-    from ragas import evaluate
+    from ragas import RunConfig, evaluate
     from ragas.metrics import (
         answer_relevancy,
         context_precision,
@@ -110,6 +111,8 @@ def ragas_scores(rows: list[dict], cfg: dict) -> dict:
         state = GRAPH.invoke(
             {"question": row["question"], "retrieval": {"final_k": FINAL_K, **cfg}}
         )
+        if state.get("route") == "out_of_scope":  # rejected, no contexts to judge
+            continue
         records["question"].append(row["question"])
         records["answer"].append(state.get("answer", ""))
         records["contexts"].append([h.text for h in state.get("hits", [])] or [""])
@@ -123,16 +126,19 @@ def ragas_scores(rows: list[dict], cfg: dict) -> dict:
             return embed_dense_one(text)
 
     metrics = [faithfulness, answer_relevancy, context_precision]
-    # RAGAS defaults to OpenAI; use the configured endpoint so Groq/Ollama work too.
+    # RAGAS defaults to OpenAI; use the configured judge endpoint so Groq/Ollama work too.
     result = evaluate(
         Dataset.from_dict(records),
         metrics=metrics,
         llm=ChatOpenAI(
-            model=LLM_MODEL,
-            base_url=LLM_BASE_URL,
-            api_key=LLM_API_KEY or "not-needed-for-local",
+            model=JUDGE_MODEL,
+            base_url=JUDGE_BASE_URL,
+            api_key=JUDGE_API_KEY or "not-needed-for-local",
         ),
         embeddings=LocalEmbeddings(),
+        # RAGAS's default 16 workers / 180 s made 44 of 75 jobs time out on a local
+        # Ollama judge, and timed-out items silently drop out of the mean.
+        run_config=RunConfig(max_workers=4, timeout=600),
     )
     scores = result.to_pandas()
     return {m.name: round(float(scores[m.name].mean()), 4) for m in metrics}
@@ -142,6 +148,10 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--dataset", default="eval/dataset.jsonl")
     ap.add_argument("--no-ragas", action="store_true", help="retrieval metrics only")
+    ap.add_argument(
+        "--ragas-configs", nargs="+", choices=list(CONFIGS), default=list(CONFIGS),
+        help="configs to score with RAGAS (each costs ~1 LLM run + judge calls per question)",
+    )
     ap.add_argument("--out", default="eval/results.csv")
     args = ap.parse_args()
 
@@ -153,7 +163,7 @@ def main() -> None:
         print(f"--- {name} ---")
         ranks[name] = []
         scores = {"config": name, **retrieval_scores(rows, cfg, ranks[name])}
-        if not args.no_ragas:
+        if not args.no_ragas and name in args.ragas_configs:
             scores.update(ragas_scores(rows, cfg))
         table.append(scores)
         print("  " + "  ".join(f"{k}={v}" for k, v in scores.items() if k != "config"))

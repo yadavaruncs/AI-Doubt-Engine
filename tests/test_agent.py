@@ -101,6 +101,7 @@ def test_last_round_must_answer_instead_of_calling_tools(monkeypatch):
         ("**conceptual**", "q", "conceptual"),
         ("Category: out of scope", "q", "out_of_scope"),
         ("out-of-scope", "q", "out_of_scope"),
+        ("not out of scope, this is conceptual", "q", "conceptual"),
         ("no idea", "a 20 m tower", "numeric"),
         ("no idea", "what is inertia", "conceptual"),
     ],

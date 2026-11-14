@@ -93,7 +93,9 @@ def route_node(state: DoubtState) -> DoubtState:
     )
     # Tolerates "**numeric**", "Category: numeric", "out of scope"...
     text = re.sub(r"[\s-]+", "_", out.text.lower())
-    label = next((l for l in ("out_of_scope", "numeric", "conceptual") if l in text), None)
+    # Last mention wins: "not out of scope, this is conceptual" contains out_of_scope too.
+    labels = ("out_of_scope", "numeric", "conceptual")
+    label = max((l for l in labels if l in text), key=text.rfind, default=None)
     if label is None:
         # The numeric path also retrieves, so it is safe for a question with numbers.
         label = "numeric" if re.search(r"\d", state["question"]) else "conceptual"

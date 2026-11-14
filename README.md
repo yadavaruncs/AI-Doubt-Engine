@@ -48,7 +48,7 @@ This project addresses each of those explicitly and measures the result.
                               answer + citations
 ```
 
-A **semantic cache** sits in front of the whole graph: questions within a cosine threshold of a previously answered one return instantly, which is the single biggest latency and cost win in an edtech workload where thousands of students ask the same doubt in different words. Numeric answers are never cached, because "20 m tower" and "50 m tower" embed almost identically but have different answers. Entries expire after `SEMANTIC_CACHE_TTL` so a re-ingest takes effect.
+A **semantic cache** fronts the HTTP `/ask` endpoint: questions within a cosine threshold of a previously answered one return instantly, which is the single biggest latency and cost win in an edtech workload where thousands of students ask the same doubt in different words. Numeric answers are never cached, because "20 m tower" and "50 m tower" embed almost identically but have different answers. Entries expire after `SEMANTIC_CACHE_TTL` so a re-ingest takes effect. The evaluation harness calls the graph directly and deliberately skips the cache, so every config answers every question itself.
 
 `POST /ask` accepts up to six prior turns in `history`. When present, a condense step first rewrites the follow-up into a standalone question, so the router, retriever and answer prompts stay conversation-free. Turns with history bypass the cache.
 
@@ -112,6 +112,9 @@ python -m eval.run_eval --dataset eval/dataset.jsonl --no-ragas
 # full run, adds RAGAS faithfulness / relevancy / context precision
 pip install -r requirements-eval.txt
 python -m eval.run_eval --dataset eval/dataset.jsonl
+
+# RAGAS on one config only (each config costs one answer run per question plus judge calls)
+python -m eval.run_eval --dataset eval/dataset.jsonl --ragas-configs hybrid_rerank
 ```
 
 It runs the same questions through four configurations and writes [eval/results.csv](eval/results.csv), plus [eval/per_question.csv](eval/per_question.csv) with the rank of the first relevant chunk for every question and config.
@@ -136,7 +139,21 @@ What it showed:
 - **Numeric questions are the weak spot.** Three of hybrid_rerank's four misses are numeric ("dropped from a 20 m tower", "2 kg at 10 m/s", "heat 1 kg of water"). The numbers and setup match worked examples about *other* values, not the section that states the formula. The kinetic-energy question was missed by every config.
 - **These are directions, not proof.** Hybrid vs dense: 14 questions better, 7 worse (two-sided sign test p ≈ 0.19). Hybrid_rerank vs hybrid: 7 better, 11 worse (p ≈ 0.48). With 75 questions, a difference of a few questions is within noise.
 
-Caveats: the index stops at page 1479 of 1671, because ingest was cut short. That drops the second half of chapter 32 (nuclear fission and fusion), chapters 33–34 and the appendices, though every scored question still has a matching passage in the index. Latency was measured while the API was also serving requests, so read it as relative, not absolute. RAGAS answer metrics (faithfulness and others) have not been run: the free Groq tier's 1,000 requests a day does not cover about 3,000 judge calls.
+### Answer quality (RAGAS)
+
+Measured 2026-11-14, fully offline on a laptop RTX 4060: answers by `qwen2.5:7b`, judged by `llama3` 8B, both on Ollama. The judge is a different model from the answerer, so the scores are not self-graded. Only `hybrid_rerank` was scored, on every third question of the dataset (27). The 2 out-of-scope probes among them were correctly refused and are excluded, leaving 25. Raw output: [eval/ragas_results.csv](eval/ragas_results.csv).
+
+| metric | score | answers scored |
+|---|---|---|
+| faithfulness | 0.780 | 14 of 25 |
+| answer_relevancy | 0.710 | 25 of 25 |
+| context_precision | 0.929 | 25 of 25 |
+
+- **Faithfulness is the number to watch.** On average 78% of the claims in an answer are supported by the retrieved passages, so about one claim in five comes from the model rather than the book. It rests on 14 answers: the 8B judge returned unparseable output for the other 11, and RAGAS drops those.
+- **Retrieved context is mostly on target.** Context precision of 0.93 agrees with the retrieval table: the passages the judge found relevant were ranked above the ones it did not.
+- **This is not the deployed model.** The app is configured for `qwen/qwen3.8-27b` on Groq, but answering even one config on Groq's free tier did not fit its 200,000 tokens a day. A 7B answerer and an 8B judge likely understate quality and add noise. One numeric question (thin-lens image distance) ran out of tool rounds and replied "I couldn't finish this calculation reliably"; the kinetic-energy question used the calculator and got 100 J.
+
+Caveats: the index stops at page 1479 of 1671, because ingest was cut short. That drops the second half of chapter 32 (nuclear fission and fusion), chapters 33–34 and the appendices, though every scored question still has a matching passage in the index. Latency was measured while the API was also serving requests, so read it as relative, not absolute. Hybrid retrieval is not fully deterministic: four runs of the same code on the same index gave hybrid_only MRR of 0.834, 0.844, 0.852 and 0.859, while dense results were identical every time. Read the hybrid MRR figures as carrying about ±0.01 of run-to-run noise; the cause is not yet pinned down. By default the RAGAS judge is the same model that wrote the answers (`JUDGE_MODEL`, `JUDGE_BASE_URL` and `JUDGE_API_KEY` fall back to the `LLM_*` values), which makes faithfulness self-evaluated and likely inflated. Set the `JUDGE_*` variables to a different model for a fair score, as the run above did. Out-of-scope rejections are excluded from the RAGAS scores, since they have no retrieved context to judge.
 
 Run on a different corpus or change a setting (`DENSE_MODEL`, `CHUNK_SIZE`, `CANDIDATES_K`) and re-measure. `per_question.csv` shows which questions moved.
 
@@ -190,7 +207,7 @@ ui/              Streamlit front end showing sources, route, latency
 
 ## Credits
 
-The multi-query expansion and question-type routing ideas were informed by [tan7vir/Physics-Chatbot-using-Advanced-RAG](https://github.com/tan7vir/Physics-Chatbot-using-Advanced-RAG). The implementation here is independent, built on a current stack with hybrid retrieval, reranking, evaluation and tests added.
+The question-type routing idea was informed by [tan7vir/Physics-Chatbot-using-Advanced-RAG](https://github.com/tan7vir/Physics-Chatbot-using-Advanced-RAG). The implementation here is independent, built on a current stack with hybrid retrieval, reranking, evaluation and tests added.
 
 ## License
 
