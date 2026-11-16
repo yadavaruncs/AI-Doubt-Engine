@@ -1,4 +1,4 @@
-"""Retrieval pipeline: hybrid candidates -> cross-encoder rerank -> top-K."""
+"""Retrieval pipeline: hybrid candidates -> optional cross-encoder rerank -> top-K."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ def retrieve(
     final_k: int = FINAL_K,
     candidates_k: int = CANDIDATES_K,
     use_hybrid: bool = True,
-    use_rerank: bool = True,
+    use_rerank: bool = False,  # off: lost to hybrid_only in the ablation (README, Results)
 ) -> list[Hit]:
     """The four switches here exist so the eval harness can ablate them.
 
