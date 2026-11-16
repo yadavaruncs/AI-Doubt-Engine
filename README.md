@@ -33,7 +33,7 @@ This project addresses each of those explicitly and measures the result.
           │            ┌────────────┴────────────┐
           │            │   hybrid search         │  dense (BGE) + BM25 sparse
           │            │   → RRF fusion          │  fused server-side by Qdrant
-          │            │   → cross-encoder       │  20 candidates → top 4
+          │            │   → cross-encoder       │  off by default (see Results)
           │            └────────────┬────────────┘
           │                         │
           │            ┌────────────┴────────────┐
@@ -57,7 +57,7 @@ A **semantic cache** fronts the HTTP `/ask` endpoint: questions within a cosine 
 | Decision | Why | Alternative rejected |
 |---|---|---|
 | RRF fusion in Qdrant | Fuses dense + sparse ranks server-side; one round trip | Fusing in Python — slower, more code |
-| Cross-encoder rerank | Reads query and passage jointly. On this corpus it did *not* beat hybrid alone (see Results), so it is a switch, not a given | Trusting bi-encoder distance |
+| Cross-encoder rerank | Reads query and passage jointly. On this corpus it did *not* beat hybrid alone (see Results), so it ships off (`use_rerank=False`) and stays as a switch | Trusting bi-encoder distance |
 | Route *before* retrieving | Out-of-scope messages never touch the vector store | Always retrieving — wasted cost |
 | SymPy via tool calling | Deterministic arithmetic, auditable steps | Letting the LLM compute |
 | Semantic, not exact, cache | Students rephrase constantly | `dict[question]` — near-zero hit rate |
@@ -135,13 +135,13 @@ Measured 2026-11-13 on CPU: fastembed `bge-small-en-v1.5` + `Qdrant/bm25`, reran
 What it showed:
 
 - **Hybrid search is the win, and it comes from paraphrased questions.** On textbook-term questions dense retrieval already hits 97.7%, so there is little to gain. On paraphrases, adding BM25 lifts hit rate from 84% to 94% and MRR from 0.63 to 0.73. For example, "Why is the sky blue?" moves from rank 4 to rank 1 and "Why can some insects walk on water?" from rank 2 to rank 1. Paraphrases still share some content words with the right passage, and BM25 rewards those words where the small dense model drifts to related topics.
-- **The cross-encoder did not earn its latency here.** On top of hybrid it improved 7 questions and worsened 11, MRR fell from 0.859 to 0.838, and it added about 0.9 s at p95 on CPU. A likely cause, not yet verified: the reranker was trained on web search queries and favours the book's end-of-chapter exercises, which echo a student's wording, over the explanatory passage. The next experiment is to tag chunks by section type and rerank only explanatory text, or to try a larger reranker.
+- **The cross-encoder did not earn its latency here, so the app ships `hybrid_only`.** `retrieve()` defaults to `use_hybrid=True, use_rerank=False`; the eval harness still turns reranking on for its two rerank configs. On top of hybrid it improved 7 questions and worsened 11, MRR fell from 0.859 to 0.838, and it added about 0.9 s at p95 on CPU. A likely cause, not yet verified: the reranker was trained on web search queries and favours the book's end-of-chapter exercises, which echo a student's wording, over the explanatory passage. The next experiment is to tag chunks by section type and rerank only explanatory text, or to try a larger reranker.
 - **Numeric questions are the weak spot.** Three of hybrid_rerank's four misses are numeric ("dropped from a 20 m tower", "2 kg at 10 m/s", "heat 1 kg of water"). The numbers and setup match worked examples about *other* values, not the section that states the formula. The kinetic-energy question was missed by every config.
 - **These are directions, not proof.** Hybrid vs dense: 14 questions better, 7 worse (two-sided sign test p ≈ 0.19). Hybrid_rerank vs hybrid: 7 better, 11 worse (p ≈ 0.48). With 75 questions, a difference of a few questions is within noise.
 
 ### Answer quality (RAGAS)
 
-Measured 2026-11-14, fully offline on a laptop RTX 4060: answers by `qwen2.5:7b`, judged by `llama3` 8B, both on Ollama. The judge is a different model from the answerer, so the scores are not self-graded. Only `hybrid_rerank` was scored, on every third question of the dataset (27). The 2 out-of-scope probes among them were correctly refused and are excluded, leaving 25. Raw output: [eval/ragas_results.csv](eval/ragas_results.csv).
+Measured 2026-11-14, fully offline on a laptop RTX 4060: answers by `qwen2.5:7b`, judged by `llama3` 8B, both on Ollama. The judge is a different model from the answerer, so the scores are not self-graded. Only `hybrid_rerank` was scored, which was the default when this ran; the shipped `hybrid_only` config has not been RAGAS-scored yet. It ran on every third question of the dataset (27). The 2 out-of-scope probes among them were correctly refused and are excluded, leaving 25. Raw output: [eval/ragas_results.csv](eval/ragas_results.csv).
 
 | metric | score | answers scored |
 |---|---|---|
@@ -176,7 +176,7 @@ app/
   config.py      env-driven settings
   embeddings.py  lazily-loaded dense / sparse / cross-encoder models
   store.py       Qdrant collection, hybrid RRF search, dense-only baseline
-  retrieval.py   candidates → rerank → top-k, with ablation switches
+  retrieval.py   candidates → optional rerank → top-k, with ablation switches
   tools.py       SymPy calculator + solver, hardened against injection
   graph.py       LangGraph agent: condense → route → retrieve → answer (+ tool loop)
   cache.py       semantic cache
