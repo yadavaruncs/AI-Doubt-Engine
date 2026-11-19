@@ -4,6 +4,15 @@ A retrieval-augmented physics tutor built the way a production AI system is buil
 
 Indexed corpus: [OpenStax *College Physics 2e*](https://openstax.org/details/books/college-physics-2e) (CC BY-NC-SA 4.0), 6,176 chunks. Eval: 75 scored questions plus 5 out-of-scope.
 
+**Stack:** Python 3.12, FastAPI, LangGraph, Qdrant, FastEmbed, SymPy, Streamlit, Docker Compose.
+
+## Pipeline and operations
+
+- **Ingest:** `app.ingest` reads PDF pages or UTF-8 text/Markdown files, normalizes whitespace, then splits on paragraph boundaries before applying the sliding window (defaults: 800 characters with 120 characters of overlap). Oversized paragraphs are windowed directly, and chunks shorter than 50 characters are discarded. FastEmbed creates dense and sparse vectors; Qdrant receives them in batches of 32.
+- **Re-runs and interrupted ingest:** A point ID is a UUID5 derived from the source filename, page number, and chunk text. Re-ingesting unchanged input therefore upserts the same points instead of duplicating them. Upserts are made batch by batch, so a stopped run can leave earlier batches in the collection; rerunning the same input safely upserts those IDs again. Changed or removed source content does not automatically remove its old points: use `--recreate` to drop and rebuild the collection.
+- **Serving and process-local state:** `POST /ask` is guarded by `X-API-Key`; startup rejects the public example key and an empty key unless `ALLOW_UNAUTHENTICATED=1` is explicitly set for local use. The default rate limit is 60 requests/minute per client IP, held in process memory. The semantic cache is also per process (512 entries, cosine threshold 0.93, TTL 3,600 seconds by default); it skips requests with history and does not cache numeric or out-of-scope answers. `GET /healthz` checks Qdrant collection access and reports its point count. `GET /metrics` returns JSON with in-memory cache counters and rolling p50/p95/p99 latency; cache hits are deliberately excluded from the latency sample, so its `requests` value is cache misses, not every HTTP request.
+- **Deployment and tests:** Compose runs the API, Streamlit UI, and Qdrant; Qdrant data is kept in the named `qdrant_storage` volume and its port is not published to the host. The test fixtures replace embedding calls with deterministic stubs and use an in-memory Qdrant client, so the suite itself does not need model downloads, a Qdrant server, network access, or API credentials.
+
 ---
 
 ## Why this exists
@@ -162,7 +171,7 @@ Run on a different corpus or change a setting (`DENSE_MODEL`, `CHUNK_SIZE`, `CAN
 ## Tests
 
 ```bash
-pip install pytest httpx && python -m pytest tests/ -q
+pip install -r requirements.txt pytest httpx pyyaml && python -m pytest tests/ -q
 ```
 
 No network, no API key, no Qdrant server — embeddings are stubbed and Qdrant runs in-memory. Includes a regression suite for a real vulnerability: SymPy's `parse_expr` calls `eval()` underneath, and without the guard in `app/tools.py` an expression like `__import__('os').system(...)` executes. Never pass model-generated strings to a math parser without a allowlist.
